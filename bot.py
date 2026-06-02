@@ -11,11 +11,11 @@ from datetime import datetime
 from telethon import TelegramClient, events, Button
 
 # ==================== إعدادات البوت ====================
-CHECKER_API_URL = 'http://apiehopf-production.up.railway.app:5000'
+CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 
 API_ID = 38208016
 API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
-BOT_TOKEN = '8611645280:AAEbhTIGGTQOhmTFijvzP8gpN1SCJCDSnrA'
+BOT_TOKEN = '8611645280:AAE30nGTwS1j8tyLkTE0o1iTN585AJ63h8k'
 ADMIN_IDS = [1093032296]
 
 PREMIUM_PRICE_STARS = 10000
