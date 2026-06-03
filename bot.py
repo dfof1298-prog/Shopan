@@ -38,7 +38,6 @@ def get_user_proxy_file(user_id):
     return f"user_{user_id}_proxy.txt"
 
 def load_user_sites(user_id):
-    """تحميل مواقع المستخدم (الأدمن والمستخدم زي بعض)"""
     file_path = get_user_sites_file(user_id)
     if not os.path.exists(file_path):
         return []
@@ -49,14 +48,12 @@ def load_user_sites(user_id):
         return []
 
 def save_user_sites(user_id, sites):
-    """حفظ مواقع المستخدم"""
     file_path = get_user_sites_file(user_id)
     with open(file_path, 'w', encoding='utf-8') as f:
         for site in sites:
             f.write(f"{site}\n")
 
 def load_user_proxies(user_id):
-    """تحميل بروكسيات المستخدم"""
     file_path = get_user_proxy_file(user_id)
     if not os.path.exists(file_path):
         return []
@@ -67,7 +64,6 @@ def load_user_proxies(user_id):
         return []
 
 def save_user_proxies(user_id, proxies):
-    """حفظ بروكسيات المستخدم"""
     file_path = get_user_proxy_file(user_id)
     with open(file_path, 'w', encoding='utf-8') as f:
         for proxy in proxies:
@@ -210,7 +206,6 @@ async def create_user_if_not_exists(user_id, username):
             'blocked': False
         }
         save_users(users)
-        # إشعار الأدمن
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(admin_id, premium_emoji(f"🆕 <b>New user joined!</b>\n\n🆔 ID: <code>{user_id}</code>\n👤 Username: @{username}\n📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), parse_mode='html')
@@ -345,19 +340,84 @@ async def get_user_stats_text(user_id, username):
     text += f"💡 Made by: @Joker"
     return text
 
-# ==================== دوال API الرئيسية ====================
+# ==================== فحص البروكسيات المباشر (بدون API) ====================
 
-async def check_api_connection():
-    """تأكد من أن الـ API شغال"""
+def parse_proxy_url(proxy_str):
+    """تحويل البروكسي من صيغة host:port:user:pass إلى URL صالح"""
+    if not proxy_str:
+        return None
+    
+    proxy_str = proxy_str.strip()
+    
+    # صيغة: user:pass@host:port
+    if '@' in proxy_str and ':' in proxy_str.split('@')[0]:
+        return f"http://{proxy_str}"
+    
+    # صيغة: host:port:user:pass
+    parts = proxy_str.split(':')
+    if len(parts) == 4:
+        host, port, user, password = parts
+        return f"http://{user}:{password}@{host}:{port}"
+    
+    # صيغة: host:port
+    if len(parts) == 2:
+        host, port = parts
+        return f"http://{host}:{port}"
+    
+    # صيغة: http://host:port
+    if proxy_str.startswith('http://') or proxy_str.startswith('https://'):
+        return proxy_str
+    
+    return None
+
+async def test_proxy_direct(proxy_str):
+    """فحص بروكسي مباشرة بدون API - يتصل بموقع Shopify مباشرة"""
+    proxy_url = parse_proxy_url(proxy_str)
+    if not proxy_url:
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Invalid proxy format'}
+    
+    test_url = "https://musicstore.myshopify.com"
+    
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f'{CHECKER_API_URL}/shopify?site=musicstore.myshopify.com&cc=4031630422575208|01|2030|280') as resp:
+        timeout = aiohttp.ClientTimeout(total=15)
+        connector = aiohttp.TCPConnector(ssl=False)
+        
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.get(test_url, proxy=proxy_url, ssl=False) as resp:
                 if resp.status == 200:
-                    return True
-                return False
-    except:
-        return False
+                    return {'proxy': proxy_str, 'status': 'alive', 'reason': f'HTTP {resp.status}'}
+                else:
+                    return {'proxy': proxy_str, 'status': 'dead', 'reason': f'HTTP {resp.status}'}
+    except asyncio.TimeoutError:
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Timeout (15s)'}
+    except aiohttp.ClientConnectorError as e:
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': f'Connection refused: {str(e)[:40]}'}
+    except aiohttp.ClientProxyConnectionError:
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Proxy connection failed'}
+    except Exception as e:
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': f'Error: {str(e)[:40]}'}
+
+async def test_proxy_with_retry(proxy_str, max_retries=2):
+    """فحص بروكسي مع إعادة المحاولة"""
+    for attempt in range(max_retries):
+        result = await test_proxy_direct(proxy_str)
+        if result['status'] == 'alive':
+            return result
+        if attempt < max_retries - 1:
+            await asyncio.sleep(1)
+    return result
+
+async def test_proxy_batch(proxies, batch_size=20):
+    """فحص مجموعة بروكسيات بشكل متوازي"""
+    results = []
+    for i in range(0, len(proxies), batch_size):
+        batch = proxies[i:i+batch_size]
+        tasks = [test_proxy_with_retry(proxy) for proxy in batch]
+        batch_results = await asyncio.gather(*tasks)
+        results.extend(batch_results)
+    return results
+
+# ==================== دوال فحص المواقع ====================
 
 async def test_site(site, proxy):
     test_card = "4031630422575208|01|2030|280"
@@ -380,48 +440,10 @@ async def test_site(site, proxy):
                         return {'site': site, 'status': 'dead'}
                 except:
                     return {'site': site, 'status': 'dead'}
-    except Exception as e:
+    except Exception:
         return {'site': site, 'status': 'dead'}
 
-async def test_proxy(proxy):
-    """فحص بروكسي واحد - بسيط وسريع مع إظهار سبب الفشل"""
-    test_card = "4031630422575208|01|2030|280"
-    test_site = "musicstore.myshopify.com"
-    
-    try:
-        url = f'{CHECKER_API_URL}/shopify?site={test_site}&cc={test_card}'
-        if proxy:
-            url += f'&proxy={proxy}'
-        
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return {'proxy': proxy, 'status': 'dead', 'reason': f'HTTP {resp.status}'}
-                try:
-                    raw = await resp.json()
-                    if raw.get('Status', False):
-                        return {'proxy': proxy, 'status': 'alive', 'reason': 'OK'}
-                    else:
-                        return {'proxy': proxy, 'status': 'dead', 'reason': f"API returned Status=false, Response: {raw.get('Response', 'Unknown')}"}
-                except Exception as e:
-                    return {'proxy': proxy, 'status': 'dead', 'reason': f'JSON Error: {str(e)[:50]}'}
-    except asyncio.TimeoutError:
-        return {'proxy': proxy, 'status': 'dead', 'reason': 'Timeout (20s)'}
-    except aiohttp.ClientError as e:
-        return {'proxy': proxy, 'status': 'dead', 'reason': f'Connection error: {str(e)[:50]}'}
-    except Exception as e:
-        return {'proxy': proxy, 'status': 'dead', 'reason': f'Error: {str(e)[:50]}'}
-
-async def test_proxy_with_retry(proxy, max_retries=2):
-    """فحص بروكسي مع إعادة المحاولة"""
-    for attempt in range(max_retries):
-        result = await test_proxy(proxy)
-        if result['status'] == 'alive':
-            return result
-        if attempt < max_retries - 1:
-            await asyncio.sleep(1)
-    return result
+# ==================== دوال فحص الكروت ====================
 
 async def check_card(card, site, proxy):
     try:
@@ -1004,7 +1026,6 @@ async def add_sites_file_command(event):
         await status_msg.edit(premium_emoji("⚠️ All sites already exist."), parse_mode='html')
         return
     
-    # إضافة المواقع مباشرة بدون فحص
     all_sites = list(set(current_sites + sites))
     save_user_sites(user_id, all_sites)
     await status_msg.edit(premium_emoji(f"✅ <b>Sites Added!</b>\n\nAdded {len(new_sites)} new sites.\nTotal sites: {len(all_sites)}\n\nUse /sitecheck to test them."), parse_mode='html')
@@ -1143,48 +1164,39 @@ async def proxy_check_command(event):
         await event.reply(premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
-    # تأكد من اتصال API
-    api_ok = await check_api_connection()
-    if not api_ok:
-        await event.reply(premium_emoji("❌ <b>API is not responding!</b>\n\nMake sure jo.py is running on port 5000"), parse_mode='html')
-        return
-    
     proxies = load_user_proxies(user_id)
     if not proxies:
         await event.reply(premium_emoji("❌ No proxies to check."), parse_mode='html')
         return
     
-    status_msg = await event.reply(premium_emoji(f"🔥 Checking {len(proxies)} proxies..."), parse_mode='html')
+    status_msg = await event.reply(premium_emoji(f"🔥 Checking {len(proxies)} proxies directly..."), parse_mode='html')
     
-    alive_proxies = []
-    dead_proxies = []
+    results = await test_proxy_batch(proxies)
+    
+    alive_proxies = [r['proxy'] for r in results if r['status'] == 'alive']
+    dead_proxies = [r['proxy'] for r in results if r['status'] == 'dead']
+    
+    # عرض الأسباب للبروكسيات الميتة
     dead_reasons = []
-    batch_size = 30
+    for r in results:
+        if r['status'] == 'dead':
+            short_proxy = r['proxy'][:30] + "..." if len(r['proxy']) > 30 else r['proxy']
+            dead_reasons.append(f"• {short_proxy} -> {r['reason']}")
     
-    for i in range(0, len(proxies), batch_size):
-        batch = proxies[i:i + batch_size]
-        tasks = [test_proxy_with_retry(proxy) for proxy in batch]
-        results = await asyncio.gather(*tasks)
-        
-        for res in results:
-            if res['status'] == 'alive':
-                alive_proxies.append(res['proxy'])
-            else:
-                dead_proxies.append(res['proxy'])
-                dead_reasons.append(f"• {res['proxy'][:30]}... -> {res['reason']}")
-        
-        # عرض التقدم مع الأسباب
-        reasons_text = "\n".join(dead_reasons[-5:]) if dead_reasons else "None"
-        await status_msg.edit(
-            premium_emoji(
-                f"🔥 Checking proxies...\n\n"
-                f"<b>Checked:</b> {len(alive_proxies) + len(dead_proxies)}/{len(proxies)}\n"
-                f"<b>Alive:</b> {len(alive_proxies)}\n"
-                f"<b>Dead:</b> {len(dead_proxies)}\n\n"
-                f"<b>Recent failures:</b>\n<code>{reasons_text}</code>"
-            ),
-            parse_mode='html'
-        )
+    reasons_text = "\n".join(dead_reasons[:10]) if dead_reasons else "None"
+    if len(dead_reasons) > 10:
+        reasons_text += f"\n... and {len(dead_reasons) - 10} more"
+    
+    await status_msg.edit(
+        premium_emoji(
+            f"🔥 Checking proxies...\n\n"
+            f"<b>Checked:</b> {len(alive_proxies) + len(dead_proxies)}/{len(proxies)}\n"
+            f"<b>Alive:</b> {len(alive_proxies)}\n"
+            f"<b>Dead:</b> {len(dead_proxies)}\n\n"
+            f"<b>Recent failures:</b>\n<code>{reasons_text}</code>"
+        ),
+        parse_mode='html'
+    )
     
     save_user_proxies(user_id, alive_proxies)
     
