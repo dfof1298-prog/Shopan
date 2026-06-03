@@ -7,7 +7,7 @@ import time
 import json
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from telethon import TelegramClient, events, Button
 
 # ==================== إعدادات البوت ====================
@@ -21,6 +21,7 @@ ADMIN_IDS = [1093032296]
 PREMIUM_PRICE_STARS = 10000
 DEFAULT_CHECK_LIMIT = 5000
 ADMIN_MAX_CHECKS = 999999
+PENDING_TIMEOUT = 300  # 5 دقائق صلاحية للملفات المنتظرة
 
 bot = TelegramClient('joker_bot', API_ID, API_HASH)
 
@@ -212,6 +213,26 @@ async def create_user_if_not_exists(user_id, username):
             except:
                 pass
 
+# ==================== إدارة الملفات المنتظرة ====================
+user_pending_sites = {}  # {user_id: {'sites': list, 'expires': timestamp}}
+user_pending_mass = {}   # {user_id: {'file_path': str, 'expires': timestamp}}
+
+async def cleanup_expired_pending():
+    """تنظيف الملفات المنتظرة منتهية الصلاحية"""
+    now = time.time()
+    # تنظيف مواقع منتظرة
+    for user_id in list(user_pending_sites.keys()):
+        if user_pending_sites[user_id]['expires'] < now:
+            del user_pending_sites[user_id]
+    # تنظيف ملفات فحص منتظرة
+    for user_id in list(user_pending_mass.keys()):
+        if user_pending_mass[user_id]['expires'] < now:
+            try:
+                os.remove(user_pending_mass[user_id]['file_path'])
+            except:
+                pass
+            del user_pending_mass[user_id]
+
 # ==================== دوال API ====================
 
 PREMIUM_EMOJI_IDS = {
@@ -265,8 +286,6 @@ def premium_emoji(text: str) -> str:
 active_sessions = {}
 user_current_check = {}
 user_chk_mode = {}
-user_pending_sites = {}
-user_pending_mass = {}
 
 _DEAD_INDICATORS = (
     'receipt id is empty', 'handle is empty', 'product id is empty',
@@ -340,34 +359,26 @@ async def get_user_stats_text(user_id, username):
     text += f"💡 Made by: @Joker"
     return text
 
-# ==================== دوال فحص البروكسيات المباشر ====================
+# ==================== دوال فحص البروكسيات ====================
 
 def parse_proxy_url(proxy_str):
-    """تحويل البروكسي من صيغة host:port:user:pass إلى URL صالح"""
     if not proxy_str:
         return None
-    
     proxy_str = proxy_str.strip()
-    
     if '@' in proxy_str and ':' in proxy_str.split('@')[0]:
         return f"http://{proxy_str}"
-    
     parts = proxy_str.split(':')
     if len(parts) == 4:
         host, port, user, password = parts
         return f"http://{user}:{password}@{host}:{port}"
-    
     if len(parts) == 2:
         host, port = parts
         return f"http://{host}:{port}"
-    
     if proxy_str.startswith('http://') or proxy_str.startswith('https://'):
         return proxy_str
-    
     return None
 
 async def test_proxy_direct(proxy_str):
-    """فحص بروكسي مباشرة بدون API"""
     proxy_url = parse_proxy_url(proxy_str)
     if not proxy_url:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Invalid proxy format'}
@@ -377,7 +388,6 @@ async def test_proxy_direct(proxy_str):
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         connector = aiohttp.TCPConnector(ssl=False)
-        
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.get(test_url, proxy=proxy_url, ssl=False) as resp:
                 if resp.status == 200:
@@ -386,15 +396,14 @@ async def test_proxy_direct(proxy_str):
                     return {'proxy': proxy_str, 'status': 'dead', 'reason': f'HTTP {resp.status}'}
     except asyncio.TimeoutError:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Timeout (15s)'}
-    except aiohttp.ClientConnectorError as e:
-        return {'proxy': proxy_str, 'status': 'dead', 'reason': f'Connection refused'}
+    except aiohttp.ClientConnectorError:
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Connection refused'}
     except aiohttp.ClientProxyConnectionError:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Proxy connection failed'}
     except Exception as e:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': f'Error: {str(e)[:40]}'}
 
 async def test_proxy_with_retry(proxy_str, max_retries=2):
-    """فحص بروكسي مع إعادة المحاولة"""
     for attempt in range(max_retries):
         result = await test_proxy_direct(proxy_str)
         if result['status'] == 'alive':
@@ -404,7 +413,6 @@ async def test_proxy_with_retry(proxy_str, max_retries=2):
     return result
 
 async def test_proxy_batch(proxies, batch_size=20):
-    """فحص مجموعة بروكسيات بشكل متوازي"""
     results = []
     for i in range(0, len(proxies), batch_size):
         batch = proxies[i:i+batch_size]
@@ -416,21 +424,17 @@ async def test_proxy_batch(proxies, batch_size=20):
 # ==================== دوال فحص المواقع ====================
 
 async def get_site_min_price(site):
-    """جيب أقل سعر في الموقع"""
     try:
         if site.startswith('https://') or site.startswith('http://'):
             site = site.replace('https://', '').replace('http://', '').rstrip('/')
-        
         url = f'https://{site}/products.json?limit=50'
         timeout = aiohttp.ClientTimeout(total=30)
-        
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
                 products = data.get('products', [])
-                
                 min_price = None
                 for product in products:
                     variants = product.get('variants', [])
@@ -443,8 +447,7 @@ async def get_site_min_price(site):
                             except:
                                 pass
                 return min_price
-    except Exception as e:
-        print(f"Error getting price for {site}: {e}")
+    except Exception:
         return None
 
 async def test_site(site, proxy):
@@ -1062,7 +1065,10 @@ async def add_sites_file_command(event):
     os.remove(file_path)
     
     # حفظ الملفات في المنتظر لاختيار السعر
-    user_pending_sites[user_id] = sites
+    user_pending_sites[user_id] = {
+        'sites': sites,
+        'expires': time.time() + PENDING_TIMEOUT
+    }
     
     price_keyboard = [
         [Button.inline(PRICE_RANGES["1"]["name"], b"price_1")],
@@ -1072,7 +1078,7 @@ async def add_sites_file_command(event):
     ]
     
     await event.reply(
-        premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nSites with minimum price above selected range will be removed.\n\nChoose '40$+ (No filter)' to skip filtering."),
+        premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\nSites with minimum price above selected range will be removed.\n\nYou have {PENDING_TIMEOUT//60} minutes to select.\n\nChoose '40$+ (No filter)' to skip filtering."),
         buttons=price_keyboard,
         parse_mode='html'
     )
@@ -1083,16 +1089,20 @@ async def handle_price_selection(event):
     data = event.data.decode('utf-8')
     price_key = data.split('_')[1]
     
+    # تنظيف الملفات منتهية الصلاحية أولاً
+    await cleanup_expired_pending()
+    
     if user_id not in user_pending_sites:
-        await event.answer("No pending sites. Please use /addsites again.", alert=True)
+        await event.answer("⚠️ Session expired or no pending sites.\nPlease use /addsites again.", alert=True)
+        await event.edit(premium_emoji("❌ <b>Session Expired!</b>\n\nYou took too long to select. Please use /addsites again."), parse_mode='html')
         return
     
-    sites = user_pending_sites.pop(user_id)
+    sites_data = user_pending_sites.pop(user_id)
+    sites = sites_data['sites']
     price_range = PRICE_RANGES[price_key]
     
     status_msg = await event.edit(premium_emoji(f"🔄 Filtering {len(sites)} sites by price ({price_range['name']})..."), parse_mode='html')
     
-    # فحص كل موقع للحصول على أقل سعر
     filtered_sites = []
     checked = 0
     total = len(sites)
@@ -1104,16 +1114,11 @@ async def handle_price_selection(event):
         min_price = await get_site_min_price(site)
         
         if min_price is None:
-            # لو معرفناش نجيب السعر، نضيفه عادي
             filtered_sites.append(site)
-            await status_msg.edit(premium_emoji(f"⚠️ Couldn't get price for: {site[:30]}\nAdded anyway."), parse_mode='html')
         elif min_price <= price_range["max"]:
             filtered_sites.append(site)
-            await status_msg.edit(premium_emoji(f"✅ {site[:30]} - ${min_price:.2f} (Accepted)"), parse_mode='html')
-        else:
-            await status_msg.edit(premium_emoji(f"❌ {site[:30]} - ${min_price:.2f} (Removed - above range)"), parse_mode='html')
         
-        await asyncio.sleep(0.3)  # تأخير بسيط عشان ما نضغطش الـ API
+        await asyncio.sleep(0.3)
     
     current_sites = load_user_sites(user_id)
     new_sites = [s for s in filtered_sites if s not in current_sites]
@@ -1354,6 +1359,13 @@ async def cancel_check_command(event):
     if user_id in user_chk_mode:
         del user_chk_mode[user_id]
         canceled = True
+    if user_id in user_pending_mass:
+        try:
+            os.remove(user_pending_mass[user_id]['file_path'])
+        except:
+            pass
+        del user_pending_mass[user_id]
+        canceled = True
     if canceled:
         await event.reply(premium_emoji("✅ <b>Mass check cancelled!</b>"), parse_mode='html')
     else:
@@ -1479,26 +1491,48 @@ async def mass_check_command(event):
         await event.reply(premium_emoji("❌ No proxies available. Add proxies first."), parse_mode='html')
         return
     
+    # تنظيف الملفات منتهية الصلاحية أولاً
+    await cleanup_expired_pending()
+    
+    # حذف أي ملف قديم للمستخدم
+    if user_id in user_pending_mass:
+        try:
+            os.remove(user_pending_mass[user_id]['file_path'])
+        except:
+            pass
+        del user_pending_mass[user_id]
+    
+    file_path = await reply_msg.download_media()
+    
+    # حفظ الملف في المنتظر
+    user_pending_mass[user_id] = {
+        'file_path': file_path,
+        'expires': time.time() + PENDING_TIMEOUT
+    }
+    
     mode_keyboard = [
         [Button.inline("💎 CHARGES ONLY", b"mode_charges")],
         [Button.inline("💎 + ✅ ALL HITS", b"mode_all")],
         [Button.inline("❌ Cancel", b"mode_cancel")]
     ]
     
-    await event.reply(premium_emoji("📋 <b>Select mode:</b>\n\n• CHARGES ONLY: Only send charged cards\n• ALL HITS: Send charged + approved cards"), buttons=mode_keyboard, parse_mode='html')
-    
-    user_pending_mass[user_id] = {
-        'file_path': await reply_msg.download_media(),
-        'user_id': user_id
-    }
+    await event.reply(
+        premium_emoji(f"📋 <b>Select mode:</b>\n\n• CHARGES ONLY: Only send charged cards\n• ALL HITS: Send charged + approved cards\n\nYou have {PENDING_TIMEOUT//60} minutes to select."),
+        buttons=mode_keyboard,
+        parse_mode='html'
+    )
 
 @bot.on(events.CallbackQuery(pattern=b"mode_charges|mode_all|mode_cancel"))
 async def handle_mode_selection(event):
     user_id = event.sender_id
     data = event.data.decode('utf-8')
     
+    # تنظيف الملفات منتهية الصلاحية أولاً
+    await cleanup_expired_pending()
+    
     if user_id not in user_pending_mass:
-        await event.answer("No pending file. Please use /chk again.", alert=True)
+        await event.answer("⚠️ Session expired or no pending file.\nPlease use /chk again.", alert=True)
+        await event.edit(premium_emoji("❌ <b>Session Expired!</b>\n\nYou took too long to select. Please use /chk again."), parse_mode='html')
         return
     
     if data == "mode_cancel":
@@ -1524,8 +1558,16 @@ async def handle_mode_selection(event):
     
     if not cards:
         await event.edit(premium_emoji("❌ No valid cards found in file."), parse_mode='html')
-        os.remove(file_path)
+        try:
+            os.remove(file_path)
+        except:
+            pass
         return
+    
+    try:
+        os.remove(file_path)
+    except:
+        pass
     
     if not is_admin(user_id):
         checks_left = get_user_checks_left(user_id)
@@ -1537,8 +1579,6 @@ async def handle_mode_selection(event):
     if len(cards) > max_cards:
         await event.edit(premium_emoji(f"⚠️ File contains {len(cards)} cards. Limiting to first {max_cards} cards."), parse_mode='html')
         cards = cards[:max_cards]
-    
-    os.remove(file_path)
     
     total_cards = len(cards)
     status_msg = await event.edit(premium_emoji(f"🔄 Starting check for {total_cards} cards..."), parse_mode='html')
