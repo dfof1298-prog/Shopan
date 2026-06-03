@@ -340,7 +340,7 @@ async def get_user_stats_text(user_id, username):
     text += f"💡 Made by: @Joker"
     return text
 
-# ==================== فحص البروكسيات المباشر (بدون API) ====================
+# ==================== دوال فحص البروكسيات المباشر ====================
 
 def parse_proxy_url(proxy_str):
     """تحويل البروكسي من صيغة host:port:user:pass إلى URL صالح"""
@@ -349,29 +349,25 @@ def parse_proxy_url(proxy_str):
     
     proxy_str = proxy_str.strip()
     
-    # صيغة: user:pass@host:port
     if '@' in proxy_str and ':' in proxy_str.split('@')[0]:
         return f"http://{proxy_str}"
     
-    # صيغة: host:port:user:pass
     parts = proxy_str.split(':')
     if len(parts) == 4:
         host, port, user, password = parts
         return f"http://{user}:{password}@{host}:{port}"
     
-    # صيغة: host:port
     if len(parts) == 2:
         host, port = parts
         return f"http://{host}:{port}"
     
-    # صيغة: http://host:port
     if proxy_str.startswith('http://') or proxy_str.startswith('https://'):
         return proxy_str
     
     return None
 
 async def test_proxy_direct(proxy_str):
-    """فحص بروكسي مباشرة بدون API - يتصل بموقع Shopify مباشرة"""
+    """فحص بروكسي مباشرة بدون API"""
     proxy_url = parse_proxy_url(proxy_str)
     if not proxy_url:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Invalid proxy format'}
@@ -391,7 +387,7 @@ async def test_proxy_direct(proxy_str):
     except asyncio.TimeoutError:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Timeout (15s)'}
     except aiohttp.ClientConnectorError as e:
-        return {'proxy': proxy_str, 'status': 'dead', 'reason': f'Connection refused: {str(e)[:40]}'}
+        return {'proxy': proxy_str, 'status': 'dead', 'reason': f'Connection refused'}
     except aiohttp.ClientProxyConnectionError:
         return {'proxy': proxy_str, 'status': 'dead', 'reason': 'Proxy connection failed'}
     except Exception as e:
@@ -418,6 +414,38 @@ async def test_proxy_batch(proxies, batch_size=20):
     return results
 
 # ==================== دوال فحص المواقع ====================
+
+async def get_site_min_price(site):
+    """جيب أقل سعر في الموقع"""
+    try:
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        
+        url = f'https://{site}/products.json?limit=50'
+        timeout = aiohttp.ClientTimeout(total=30)
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                products = data.get('products', [])
+                
+                min_price = None
+                for product in products:
+                    variants = product.get('variants', [])
+                    for variant in variants:
+                        if variant.get('available', True):
+                            try:
+                                price = float(variant.get('price', 0))
+                                if min_price is None or price < min_price:
+                                    min_price = price
+                            except:
+                                pass
+                return min_price
+    except Exception as e:
+        print(f"Error getting price for {site}: {e}")
+        return None
 
 async def test_site(site, proxy):
     test_card = "4031630422575208|01|2030|280"
@@ -994,6 +1022,15 @@ async def site_check_command(event):
 Your sites have been updated with only working sites."""
     await status_msg.edit(premium_emoji(summary), parse_mode='html')
 
+# ==================== إضافة المواقع مع فلتر السعر ====================
+
+PRICE_RANGES = {
+    "1": {"name": "🔰 5$ - 15$", "min": 5, "max": 15},
+    "2": {"name": "💰 10$ - 30$", "min": 10, "max": 30},
+    "3": {"name": "💎 20$ - 50$", "min": 20, "max": 50},
+    "4": {"name": "⭐ 40$+ (No filter)", "min": 0, "max": 999999}
+}
+
 @bot.on(events.NewMessage(pattern='/addsites'))
 async def add_sites_file_command(event):
     user_id = event.sender_id
@@ -1009,26 +1046,95 @@ async def add_sites_file_command(event):
         await event.reply(premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
         return
     
-    status_msg = await event.reply(premium_emoji("🔄 Processing your file..."), parse_mode='html')
     file_path = await reply_msg.download_media()
+    
     async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         content = await f.read()
+    
     sites = [line.strip() for line in content.split('\n') if line.strip()]
     sites = [s.replace('https://', '').replace('http://', '').rstrip('/') for s in sites]
+    
     if not sites:
-        await status_msg.edit(premium_emoji("❌ No valid sites found in file."), parse_mode='html')
+        await event.reply(premium_emoji("❌ No valid sites found in file."), parse_mode='html')
         os.remove(file_path)
         return
+    
     os.remove(file_path)
-    current_sites = load_user_sites(user_id)
-    new_sites = [s for s in sites if s not in current_sites]
-    if not new_sites:
-        await status_msg.edit(premium_emoji("⚠️ All sites already exist."), parse_mode='html')
+    
+    # حفظ الملفات في المنتظر لاختيار السعر
+    user_pending_sites[user_id] = sites
+    
+    price_keyboard = [
+        [Button.inline(PRICE_RANGES["1"]["name"], b"price_1")],
+        [Button.inline(PRICE_RANGES["2"]["name"], b"price_2")],
+        [Button.inline(PRICE_RANGES["3"]["name"], b"price_3")],
+        [Button.inline(PRICE_RANGES["4"]["name"], b"price_4")]
+    ]
+    
+    await event.reply(
+        premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nSites with minimum price above selected range will be removed.\n\nChoose '40$+ (No filter)' to skip filtering."),
+        buttons=price_keyboard,
+        parse_mode='html'
+    )
+
+@bot.on(events.CallbackQuery(pattern=b"price_[1-4]"))
+async def handle_price_selection(event):
+    user_id = event.sender_id
+    data = event.data.decode('utf-8')
+    price_key = data.split('_')[1]
+    
+    if user_id not in user_pending_sites:
+        await event.answer("No pending sites. Please use /addsites again.", alert=True)
         return
     
-    all_sites = list(set(current_sites + sites))
+    sites = user_pending_sites.pop(user_id)
+    price_range = PRICE_RANGES[price_key]
+    
+    status_msg = await event.edit(premium_emoji(f"🔄 Filtering {len(sites)} sites by price ({price_range['name']})..."), parse_mode='html')
+    
+    # فحص كل موقع للحصول على أقل سعر
+    filtered_sites = []
+    checked = 0
+    total = len(sites)
+    
+    for site in sites:
+        checked += 1
+        await status_msg.edit(premium_emoji(f"🔄 Checking site {checked}/{total}: {site[:30]}..."), parse_mode='html')
+        
+        min_price = await get_site_min_price(site)
+        
+        if min_price is None:
+            # لو معرفناش نجيب السعر، نضيفه عادي
+            filtered_sites.append(site)
+            await status_msg.edit(premium_emoji(f"⚠️ Couldn't get price for: {site[:30]}\nAdded anyway."), parse_mode='html')
+        elif min_price <= price_range["max"]:
+            filtered_sites.append(site)
+            await status_msg.edit(premium_emoji(f"✅ {site[:30]} - ${min_price:.2f} (Accepted)"), parse_mode='html')
+        else:
+            await status_msg.edit(premium_emoji(f"❌ {site[:30]} - ${min_price:.2f} (Removed - above range)"), parse_mode='html')
+        
+        await asyncio.sleep(0.3)  # تأخير بسيط عشان ما نضغطش الـ API
+    
+    current_sites = load_user_sites(user_id)
+    new_sites = [s for s in filtered_sites if s not in current_sites]
+    all_sites = list(set(current_sites + filtered_sites))
     save_user_sites(user_id, all_sites)
-    await status_msg.edit(premium_emoji(f"✅ <b>Sites Added!</b>\n\nAdded {len(new_sites)} new sites.\nTotal sites: {len(all_sites)}\n\nUse /sitecheck to test them."), parse_mode='html')
+    
+    result_text = f"""✅ <b>Sites Added with Price Filter!</b>
+
+📊 <b>Summary:</b>
+├ Total sites in file: {len(sites)}
+├ Sites after filter: {len(filtered_sites)}
+├ New sites added: {len(new_sites)}
+└ Total sites now: {len(all_sites)}
+
+💰 <b>Filter applied:</b> {price_range['name']}
+
+⚠️ <b>Note:</b> Sites without price info were added anyway.
+📌 Use /sitecheck to verify all sites are working."""
+    
+    await status_msg.edit(premium_emoji(result_text), parse_mode='html')
+    await event.answer()
 
 @bot.on(events.NewMessage(pattern='/addproxy'))
 async def add_proxy_command(event):
@@ -1176,7 +1282,6 @@ async def proxy_check_command(event):
     alive_proxies = [r['proxy'] for r in results if r['status'] == 'alive']
     dead_proxies = [r['proxy'] for r in results if r['status'] == 'dead']
     
-    # عرض الأسباب للبروكسيات الميتة
     dead_reasons = []
     for r in results:
         if r['status'] == 'dead':
@@ -1374,7 +1479,6 @@ async def mass_check_command(event):
         await event.reply(premium_emoji("❌ No proxies available. Add proxies first."), parse_mode='html')
         return
     
-    # سؤال المستخدم عن وضع الفحص
     mode_keyboard = [
         [Button.inline("💎 CHARGES ONLY", b"mode_charges")],
         [Button.inline("💎 + ✅ ALL HITS", b"mode_all")],
@@ -1383,7 +1487,6 @@ async def mass_check_command(event):
     
     await event.reply(premium_emoji("📋 <b>Select mode:</b>\n\n• CHARGES ONLY: Only send charged cards\n• ALL HITS: Send charged + approved cards"), buttons=mode_keyboard, parse_mode='html')
     
-    # تخزين مؤقت لمعالجة الملف لاحقاً
     user_pending_mass[user_id] = {
         'file_path': await reply_msg.download_media(),
         'user_id': user_id
@@ -1424,7 +1527,6 @@ async def handle_mode_selection(event):
         os.remove(file_path)
         return
     
-    # الحد الأقصى للمستخدم العادي (5000 فحص)
     if not is_admin(user_id):
         checks_left = get_user_checks_left(user_id)
         if len(cards) > checks_left:
