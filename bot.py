@@ -15,12 +15,12 @@ CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 
 API_ID = 38208016
 API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
-BOT_TOKEN = '8611645280:AAE30nGTwS1j8tyLkTE0o1iTN585AJ63h8k'
+BOT_TOKEN = '8519473125:AAFEcTaZkeZQ8P6NNtzxfVtLkUO7UZ77QiA'
 ADMIN_IDS = [1093032296]
 
 PREMIUM_PRICE_STARS = 10000
 DEFAULT_CHECK_LIMIT = 2000
-ADMIN_MAX_CHECKS = 100000  # الأدمن يفحص أي عدد
+ADMIN_MAX_CHECKS = 100000
 
 bot = TelegramClient('joker_bot', API_ID, API_HASH)
 
@@ -468,7 +468,7 @@ async def check_card(card, site, proxy):
         
         # Charged
         if any(kw in response_upper for kw in charged_keywords):
-            print(f"[✓] CHARGED: {card} | {response_msg}")
+            print(f"[✓] CHARGED on {site}: {card} | {response_msg}")
             return {
                 'status': 'Charged', 
                 'message': response_msg, 
@@ -479,7 +479,7 @@ async def check_card(card, site, proxy):
             }
         # Approved (INSUFFICIENT_FUNDS فقط)
         elif any(kw in response_upper for kw in approved_keywords):
-            print(f"[!] APPROVED (Insufficient Funds): {card} | {response_msg}")
+            print(f"[!] APPROVED on {site}: {card} | {response_msg}")
             return {
                 'status': 'Approved', 
                 'message': response_msg, 
@@ -490,7 +490,7 @@ async def check_card(card, site, proxy):
             }
         # أي حاجة تانية = Dead
         else:
-            print(f"[✗] DEAD: {card} | {response_msg}")
+            print(f"[✗] DEAD on {site}: {card} | {response_msg}")
             return {
                 'status': 'Dead', 
                 'message': response_msg if response_msg else 'Card Declined', 
@@ -572,7 +572,7 @@ def is_dead_site_error(error_msg):
     return any(keyword in error_lower for keyword in _DEAD_INDICATORS)
 
 async def send_hit_message(user_id, result, hit_type):
-    """إرسال الـ Hit في رسالة منفصلة للـ Charged و Approved (INSUFFICIENT_FUNDS فقط)"""
+    """إرسال الـ Hit في رسالة منفصلة مع اسم الموقع"""
     if hit_type == 'Charged':
         emoji = "💎"
         status_text = "𝐂𝐇𝐀𝐑𝐆𝐄𝐃"
@@ -581,13 +581,17 @@ async def send_hit_message(user_id, result, hit_type):
         status_text = "𝐀𝐏𝐏𝐑𝐎𝐕𝐄𝐃 (Insufficient Funds)"
 
     brand, bin_type, level, bank, country, flag = await get_bin_info(result['card'].split('|')[0])
+    
+    site_name = result.get('site', 'Unknown')
+    price_text = result.get('price', '-')
 
     message = f"""<b>━━━━━━━━━━━━━━━━━</b>
 <b>⚡ 𝐇𝐢𝐭</b>
 <blockquote>{emoji} Status: {status_text}</blockquote>
 <blockquote>💳 Card: <code>{result['card']}</code></blockquote>
 <blockquote>📝 Response: {result['message'][:150]}</blockquote>
-<blockquote>🌐 𝐆𝐚𝐭𝐞𝐰𝐚𝐲: 🔥 {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
+<blockquote>🌐 𝐆𝐚𝐭𝐞𝐰𝐚𝐲: 🔥 {result.get('gateway', 'Unknown')} | 💰 {price_text}</blockquote>
+<blockquote>🏪 Site: {site_name}</blockquote>
 <b>💠 𝐁𝐈𝐍 𝐈𝐧𝐟𝐨</b>
 <pre>𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {brand} - {bin_type} - {level}
 𝗕𝗮𝗻𝗸: {bank}
@@ -612,7 +616,16 @@ async def start(event):
         username = sender.username if sender.username else f"user_{user_id}"
     except:
         username = f"user_{user_id}"
+    
     await create_user_if_not_exists(user_id, username)
+    
+    # إرسال إشعار للأدمن بدخول مستخدم جديد
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, premium_emoji(f"🟢 <b>دخول جديد</b>\n\nالمستخدم: @{username}\nالمعرف: <code>{user_id}</code>\nالوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), parse_mode='html')
+        except:
+            pass
+    
     stats_text = await get_user_stats_text(user_id, username)
     await event.reply(
         premium_emoji(stats_text),
@@ -644,7 +657,7 @@ async def handle_menu_callback(event):
 ├ <code>/site domain</code> - إضافة موقع
 ├ <code>/sitecheck</code> - فحص المواقع
 ├ <code>/rmsite url</code> - حذف موقع
-├ <code>/addsites</code> - رفع ملف مواقع
+├ <code>/addsites</code> - رفع ملف مواقع (بدون فحص)
 
 <b>🔌 إدارة البروكسيات</b>
 ├ <code>/proxy</code> - فحص البروكسيات
@@ -709,7 +722,7 @@ async def help_command(event):
 ├ <code>/site domain</code> - إضافة موقع
 ├ <code>/sitecheck</code> - فحص المواقع وإزالة الميت
 ├ <code>/rmsite url</code> - حذف موقع محدد
-├ <code>/addsites</code> - رفع ملف .txt يحتوي على مواقع
+├ <code>/addsites</code> - رفع ملف .txt يحتوي على مواقع (بدون فحص)
 
 <b>🔌 إدارة البروكسيات</b>
 ├ <code>/proxy</code> - فحص البروكسيات وإزالة الميت
@@ -785,7 +798,7 @@ async def profile_command(event):
 └ 📅 تاريخ التسجيل: {registered_at}"""
     await event.reply(premium_emoji(text), buttons=get_commands_keyboard(), parse_mode='html')
 
-# ==================== باقي الأوامر (اختصاراً - نفس الشكل) ====================
+# ==================== أوامر إدارة المواقع ====================
 
 @bot.on(events.NewMessage(pattern='/mysites'))
 async def mysites_command(event):
@@ -810,31 +823,6 @@ async def mysites_command(event):
             pass
     else:
         await event.reply(premium_emoji(f"📋 <b>مواقعك:</b>\n\n{sites_text}"), buttons=get_commands_keyboard(), parse_mode='html')
-
-@bot.on(events.NewMessage(pattern='/myproxy'))
-async def myproxy_command(event):
-    user_id = event.sender_id
-    if is_user_blocked(user_id) and not is_admin(user_id):
-        await event.reply(premium_emoji("🚫 <b>لقد تم حظرك من استخدام هذا البوت.</b>"), parse_mode='html')
-        return
-    proxies = load_user_proxies(user_id)
-    if not proxies:
-        await event.reply(premium_emoji("❌ لا توجد بروكسيات. استخدم /addproxy لإضافة بروكسي."), parse_mode='html')
-        return
-    if len(proxies) <= 50:
-        proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
-        await event.reply(premium_emoji(f"<b>📋 بروكسياتك ({len(proxies)}):</b>\n\n{proxy_list}"), parse_mode='html')
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"proxies_{user_id}_{timestamp}.txt"
-        async with aiofiles.open(filename, 'w') as f:
-            for i, proxy in enumerate(proxies):
-                await f.write(f"{i+1}. {proxy}\n")
-        await event.reply(premium_emoji(f"<b>📋 بروكسياتك ({len(proxies)}):</b>\n\nالملف مرفق أدناه."), file=filename, parse_mode='html')
-        try:
-            os.remove(filename)
-        except:
-            pass
 
 @bot.on(events.NewMessage(pattern=r'^/site\s+'))
 async def add_site_command(event):
@@ -952,22 +940,40 @@ async def add_sites_file_command(event):
     os.remove(file_path)
     current_sites = load_user_sites(user_id)
     new_sites = []
-    proxies = load_user_proxies(user_id)
-    if not proxies:
-        await status_msg.edit(premium_emoji("❌ لا توجد بروكسيات. أضف بروكسيات أولاً."), parse_mode='html')
-        return
-    await status_msg.edit(premium_emoji(f"🔄 جاري اختبار {len(sites)} موقع..."), parse_mode='html')
+    # إضافة المواقع مباشرة بدون فحص
     for site in sites:
         if site not in current_sites:
-            proxy = random.choice(proxies)
-            result = await test_site(site, proxy)
-            if result['status'] == 'alive':
-                new_sites.append(site)
-        else:
             new_sites.append(site)
     all_sites = list(set(current_sites + new_sites))
     save_user_sites(user_id, all_sites)
-    await status_msg.edit(premium_emoji(f"✅ <b>تمت الإضافة!</b>\n\nتمت إضافة {len(new_sites)} موقع جديد.\nإجمالي المواقع: {len(all_sites)}"), parse_mode='html')
+    await status_msg.edit(premium_emoji(f"✅ <b>تمت الإضافة!</b>\n\nتمت إضافة {len(new_sites)} موقع جديد.\nإجمالي المواقع: {len(all_sites)}\n\nلعنة المواقع الميتة، استخدم /sitecheck لإزالتها."), parse_mode='html')
+
+# ==================== أوامر إدارة البروكسيات ====================
+
+@bot.on(events.NewMessage(pattern='/myproxy'))
+async def myproxy_command(event):
+    user_id = event.sender_id
+    if is_user_blocked(user_id) and not is_admin(user_id):
+        await event.reply(premium_emoji("🚫 <b>لقد تم حظرك من استخدام هذا البوت.</b>"), parse_mode='html')
+        return
+    proxies = load_user_proxies(user_id)
+    if not proxies:
+        await event.reply(premium_emoji("❌ لا توجد بروكسيات. استخدم /addproxy لإضافة بروكسي."), parse_mode='html')
+        return
+    if len(proxies) <= 50:
+        proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
+        await event.reply(premium_emoji(f"<b>📋 بروكسياتك ({len(proxies)}):</b>\n\n{proxy_list}"), parse_mode='html')
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"proxies_{user_id}_{timestamp}.txt"
+        async with aiofiles.open(filename, 'w') as f:
+            for i, proxy in enumerate(proxies):
+                await f.write(f"{i+1}. {proxy}\n")
+        await event.reply(premium_emoji(f"<b>📋 بروكسياتك ({len(proxies)}):</b>\n\nالملف مرفق أدناه."), file=filename, parse_mode='html')
+        try:
+            os.remove(filename)
+        except:
+            pass
 
 @bot.on(events.NewMessage(pattern='/addproxy'))
 async def add_proxy_command(event):
@@ -1144,7 +1150,7 @@ async def get_proxies_command(event):
         proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
         await event.reply(premium_emoji(f"<b>📋 جميع البروكسيات ({len(proxies)}):</b>\n\n{proxy_list}"), parse_mode='html')
     else:
-        timestamp = datetime.now().strftime("%Y%md_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"proxies_{user_id}_{timestamp}.txt"
         async with aiofiles.open(filename, 'w') as f:
             for i, proxy in enumerate(proxies):
@@ -1257,6 +1263,7 @@ async def single_cc_check(event):
 <blockquote>💳 البطاقة: <code>{result['card']}</code></blockquote>
 <blockquote>📝 الرد: {result['message'][:150]}</blockquote>
 <blockquote>🌐 البوابة: 🔥 {result.get('gateway', 'Unknown')} | 💰 {result.get('price', '-')}</blockquote>
+<blockquote>🏪 الموقع: {result.get('site', 'Unknown')}</blockquote>
 <b>💠 معلومات BIN</b>
 <pre>𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {brand} - {bin_type} - {level}
 𝗕𝗮𝗻𝗸: {bank}
@@ -1360,7 +1367,6 @@ async def mass_check_command(event):
         'start_time': time.time()
     }
     
-    # متغير لتخزين الردود لكل كارت لعرضها في الواجهة
     card_responses = []
     
     try:
@@ -1398,13 +1404,13 @@ async def mass_check_command(event):
                 if not is_admin(user_id):
                     increment_user_checks(user_id, 1)
                 
-                # تخزين الرد لكل كارت
                 card_responses.append({
                     'card': card,
                     'status': res['status'],
                     'message': res['message'],
                     'price': res.get('price', '-'),
-                    'gateway': res.get('gateway', 'Unknown')
+                    'gateway': res.get('gateway', 'Unknown'),
+                    'site': res.get('site', 'Unknown')
                 })
                 
                 if res['status'] == 'Charged':
@@ -1430,7 +1436,6 @@ async def mass_check_command(event):
                             
                             gateway = all_results['charged'][0]['gateway'] if all_results['charged'] else (all_results['approved'][0]['gateway'] if all_results['approved'] else 'Unknown')
                             
-                            # بناء نص الردود المعروضة لكل كارت
                             recent_responses = ""
                             for cr in card_responses[-5:]:
                                 if cr['status'] == 'Charged':
@@ -1440,7 +1445,8 @@ async def mass_check_command(event):
                                 else:
                                     emoji = "❌"
                                 short_card = cr['card'][:10] + "***" + cr['card'][-4:] if len(cr['card']) > 15 else cr['card']
-                                recent_responses += f"{emoji} {short_card} | {cr['message'][:30]}\n"
+                                site_short = cr['site'][:20] + "..." if len(cr['site']) > 20 else cr['site']
+                                recent_responses += f"{emoji} {short_card} | {cr['message'][:25]} | {site_short}\n"
                             
                             progress_text = f"""
 <b>💠 التقدم</b>
@@ -1472,7 +1478,6 @@ async def mass_check_command(event):
             workers = list(pending)
         
         if session_key in active_sessions:
-            # لا نرسل ملف النتائج، فقط نرسل الملخص
             elapsed = int(time.time() - all_results['start_time'])
             hours = elapsed // 3600
             minutes = (elapsed % 3600) // 60
@@ -1481,10 +1486,10 @@ async def mass_check_command(event):
             hits_text = ""
             if all_results['charged']:
                 for r in all_results['charged'][:10]:
-                    hits_text += f"💎 <code>{r['card']}</code> | {r.get('price', '-')}\n"
+                    hits_text += f"💎 <code>{r['card']}</code> | {r.get('price', '-')} | {r.get('site', 'Unknown')}\n"
             if all_results['approved']:
                 for r in all_results['approved'][:10]:
-                    hits_text += f"✅ <code>{r['card']}</code> | {r.get('price', '-')}\n"
+                    hits_text += f"✅ <code>{r['card']}</code> | {r.get('price', '-')} | {r.get('site', 'Unknown')}\n"
             
             if not hits_text:
                 hits_text = "لا توجد نتائج"
