@@ -12,7 +12,7 @@ from collections import deque
 from telethon import TelegramClient, events, Button
 
 # ==================== إعدادات البوت ====================
-CHECKER_API_URL = 'http://127.0.0.1:5000'
+CHECKER_API_URL = 'https://apiehopf-production.up.railway.app'
 
 API_ID = 38208016
 API_HASH = '0d52125034b6a0d0dac3e71b40cea032'
