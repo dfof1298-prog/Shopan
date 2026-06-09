@@ -25,14 +25,12 @@ ADMIN_MAX_CHECKS = 999999
 PENDING_TIMEOUT = 300
 
 # ==================== إعدادات معدل الإرسال ====================
-MESSAGE_DELAY = 1.0  # تأخير ثانية بين الرسائل
-MAX_WORKERS = 5      # عدد الـ workers للفحص الجماعي
+MESSAGE_DELAY = 1.5      # تأخير بين الرسائل (ثواني)
+MAX_RETRY_ON_FLOOD = 3   # عدد محاولات إعادة الإرسال عند FloodWait
+MAX_WORKERS = 4          # عدد الـ workers للفحص الجماعي (قللناه لـ 4)
 
 # ==================== متغيرات التحكم ====================
 user_last_message_time = {}
-user_hit_queue = {}
-user_hit_task = {}
-
 bot = TelegramClient('joker_bot', API_ID, API_HASH)
 
 # ==================== دوال مساعدة ====================
@@ -219,14 +217,14 @@ async def create_user_if_not_exists(user_id, username):
         save_users(users)
         for admin_id in ADMIN_IDS:
             try:
-                await send_with_delay(admin_id, premium_emoji(f"🆕 <b>New user joined!</b>\n\n🆔 ID: <code>{user_id}</code>\n👤 Username: @{username}\n📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), parse_mode='html')
+                await send_with_retry(admin_id, premium_emoji(f"🆕 <b>New user joined!</b>\n\n🆔 ID: <code>{user_id}</code>\n👤 Username: @{username}\n📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), parse_mode='html')
             except:
                 pass
 
-# ==================== نظام إدارة معدل الإرسال ====================
+# ==================== نظام إعادة الإرسال التلقائي ====================
 
-async def send_with_delay(user_id, message, parse_mode='html', buttons=None, file=None):
-    """إرسال رسالة مع تأخير بسيط"""
+async def send_with_retry(user_id, message, parse_mode='html', buttons=None, file=None, retry_count=0):
+    """إرسال رسالة مع إعادة محاولة تلقائية عند FloodWait"""
     now = time.time()
     last_time = user_last_message_time.get(user_id, 0)
     time_since_last = now - last_time
@@ -245,19 +243,25 @@ async def send_with_delay(user_id, message, parse_mode='html', buttons=None, fil
         return result
     except Exception as e:
         error_msg = str(e).lower()
-        if "flood" in error_msg or "wait" in error_msg:
+        # التعامل مع FloodWait
+        if "flood" in error_msg or "wait" in error_msg or "429" in error_msg:
             import re
             match = re.search(r'(\d+)', str(e))
             if match:
                 wait_time = int(match.group(1))
                 print(f"[!] FloodWait: Waiting {wait_time} seconds for user {user_id}...")
                 await asyncio.sleep(wait_time + 2)
-                if file:
-                    return await bot.send_message(user_id, message, file=file, parse_mode=parse_mode)
-                elif buttons:
-                    return await bot.send_message(user_id, message, buttons=buttons, parse_mode=parse_mode)
+                # إعادة المحاولة
+                if retry_count < MAX_RETRY_ON_FLOOD:
+                    return await send_with_retry(user_id, message, parse_mode, buttons, file, retry_count + 1)
                 else:
-                    return await bot.send_message(user_id, message, parse_mode=parse_mode)
+                    print(f"[!] Max retries reached for user {user_id}")
+                    return None
+            else:
+                # إذا ما قدرنا نستخرج الوقت، نستنى 30 ثانية
+                await asyncio.sleep(30)
+                if retry_count < MAX_RETRY_ON_FLOOD:
+                    return await send_with_retry(user_id, message, parse_mode, buttons, file, retry_count + 1)
         raise
 
 # ==================== إدارة الملفات المنتظرة ====================
@@ -468,10 +472,46 @@ async def test_proxy_batch(proxies, batch_size=20):
 
 # ==================== دوال فحص المواقع ====================
 
-async def get_site_min_price(site):
+# البوابات المسموحة فقط (Shopify)
+ALLOWED_GATEWAYS = ['shopify payments', 'shopify', 'shopify_payments']
+
+async def get_site_gateway(site, proxy):
+    """جلب بوابة الموقع باستخدام كارت اختبار"""
+    test_card = "4031630422575208|01|2030|280"
     try:
         if site.startswith('https://') or site.startswith('http://'):
             site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        url = f'{CHECKER_API_URL}/shopify?site={site}&cc={test_card}'
+        if proxy:
+            url += f'&proxy={proxy}'
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                raw = await resp.json()
+                gateway = raw.get('Gateway', '').lower()
+                return gateway
+    except Exception:
+        return None
+
+async def filter_sites_by_gateway(sites, proxy):
+    """تصفية المواقع - يسمح فقط بـ Shopify Payments"""
+    filtered = []
+    for site in sites:
+        gateway = await get_site_gateway(site, proxy)
+        if gateway and any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
+            filtered.append(site)
+    return filtered
+
+async def get_site_cheapest_product_price(site, proxy):
+    """جلب سعر أرخص منتج متاح في الموقع"""
+    test_card = "4031630422575208|01|2030|280"
+    try:
+        if site.startswith('https://') or site.startswith('http://'):
+            site = site.replace('https://', '').replace('http://', '').rstrip('/')
+        
+        # أولاً: نجيب المنتج الأرخص
         url = f'https://{site}/products.json?limit=50'
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -480,7 +520,10 @@ async def get_site_min_price(site):
                     return None
                 data = await resp.json()
                 products = data.get('products', [])
+                
                 min_price = None
+                cheapest_variant = None
+                
                 for product in products:
                     variants = product.get('variants', [])
                     for variant in variants:
@@ -489,10 +532,15 @@ async def get_site_min_price(site):
                                 price = float(variant.get('price', 0))
                                 if min_price is None or price < min_price:
                                     min_price = price
+                                    cheapest_variant = variant
                             except:
                                 pass
-                return min_price
-    except Exception:
+                
+                if cheapest_variant:
+                    return min_price
+                return None
+    except Exception as e:
+        print(f"Error getting price for {site}: {e}")
         return None
 
 async def test_site(site, proxy):
@@ -662,7 +710,6 @@ def is_dead_site_error(error_msg):
     return any(keyword in error_lower for keyword in _DEAD_INDICATORS)
 
 async def send_hit_message(user_id, result, hit_type):
-    """إرسال الـ Hit مباشرة"""
     if hit_type == 'Charged':
         emoji = "💎"
         status_text = "𝐂𝐇𝐀𝐑𝐆𝐄𝐃"
@@ -684,7 +731,7 @@ async def send_hit_message(user_id, result, hit_type):
 𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {country} {flag}</pre>
 """
 
-    await send_with_delay(user_id, premium_emoji(message), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(message), parse_mode='html')
 
 # ==================== أوامر البوت الأساسية ====================
 
@@ -708,14 +755,14 @@ async def check_subscription(event):
         return
     
     if not is_user_subscribed(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Access Denied</b>\n\nOnly premium users can use this bot.\n\nSubscribe: /subscribe\nRedeem code: /redeem CODE"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Access Denied</b>\n\nOnly premium users can use this bot.\n\nSubscribe: /subscribe\nRedeem code: /redeem CODE"), parse_mode='html')
         raise events.StopPropagation
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     try:
         sender = await event.get_sender()
@@ -724,7 +771,7 @@ async def start(event):
         username = f"user_{user_id}"
     await create_user_if_not_exists(user_id, username)
     stats_text = await get_user_stats_text(user_id, username)
-    await send_with_delay(
+    await send_with_retry(
         user_id,
         premium_emoji(stats_text),
         buttons=get_main_menu_keyboard(),
@@ -811,7 +858,7 @@ async def handle_menu_callback(event):
 async def help_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     help_text = """<b>📋 User Commands:</b>
@@ -865,13 +912,13 @@ async def help_command(event):
 ├ <code>/user user_id</code> - Show user details
 └ <code>/stats</code> - Bot statistics"""
     
-    await send_with_delay(user_id, premium_emoji(help_text), buttons=get_commands_keyboard(), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(help_text), buttons=get_commands_keyboard(), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/profile'))
 async def profile_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     users = load_users()
@@ -904,18 +951,18 @@ async def profile_command(event):
 ├ 📈 Check Limit: {check_limit}
 ├ 💳 Remaining: {checks_left if not is_admin(user_id) else '♾️'}
 └ 📅 Registered: {registered_at}"""
-    await send_with_delay(user_id, premium_emoji(text), buttons=get_commands_keyboard(), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(text), buttons=get_commands_keyboard(), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/mysites'))
 async def mysites_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     sites = load_user_sites(user_id)
     if not sites:
-        await send_with_delay(user_id, premium_emoji("❌ No sites found. Use /site to add."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No sites found. Use /site to add."), parse_mode='html')
         return
     sites_text = '\n'.join([f"• {site}" for site in sites])
     if len(sites_text) > 4000:
@@ -923,51 +970,51 @@ async def mysites_command(event):
         filename = f"sites_{user_id}_{timestamp}.txt"
         async with aiofiles.open(filename, 'w') as f:
             await f.write('\n'.join(sites))
-        await send_with_delay(user_id, premium_emoji(f"📋 <b>Your sites ({len(sites)}):</b>"), file=filename, parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"📋 <b>Your sites ({len(sites)}):</b>"), file=filename, parse_mode='html')
         try:
             os.remove(filename)
         except:
             pass
     else:
-        await send_with_delay(user_id, premium_emoji(f"📋 <b>Your sites:</b>\n\n{sites_text}"), buttons=get_commands_keyboard(), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"📋 <b>Your sites:</b>\n\n{sites_text}"), buttons=get_commands_keyboard(), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/clearsites'))
 async def clear_sites_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     current_sites = load_user_sites(user_id)
     count = len(current_sites)
     if count == 0:
-        await send_with_delay(user_id, premium_emoji("❌ No sites to clear."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No sites to clear."), parse_mode='html')
         return
     
     save_user_sites(user_id, [])
-    await send_with_delay(user_id, premium_emoji(f"✅ <b>Cleared all {count} sites!</b>"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"✅ <b>Cleared all {count} sites!</b>"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/myproxy'))
 async def myproxy_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     proxies = load_user_proxies(user_id)
     if not proxies:
-        await send_with_delay(user_id, premium_emoji("❌ No proxies found. Use /addproxy to add."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No proxies found. Use /addproxy to add."), parse_mode='html')
         return
     if len(proxies) <= 50:
         proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
-        await send_with_delay(user_id, premium_emoji(f"<b>📋 Your proxies ({len(proxies)}):</b>\n\n{proxy_list}"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"<b>📋 Your proxies ({len(proxies)}):</b>\n\n{proxy_list}"), parse_mode='html')
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"proxies_{user_id}_{timestamp}.txt"
         async with aiofiles.open(filename, 'w') as f:
             for i, proxy in enumerate(proxies):
                 await f.write(f"{i+1}. {proxy}\n")
-        await send_with_delay(user_id, premium_emoji(f"<b>📋 Your proxies ({len(proxies)}):</b>\n\nFile attached below."), file=filename, parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"<b>📋 Your proxies ({len(proxies)}):</b>\n\nFile attached below."), file=filename, parse_mode='html')
         try:
             os.remove(filename)
         except:
@@ -977,22 +1024,22 @@ async def myproxy_command(event):
 async def add_site_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     args = event.message.text.split(' ', 1)
     if len(args) < 2:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/site https://domain.com</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/site https://domain.com</code>"), parse_mode='html')
         return
     site = args[1].strip()
     site = site.replace('https://', '').replace('http://', '').rstrip('/')
     
     proxies = load_user_proxies(user_id)
     if not proxies:
-        await send_with_delay(user_id, premium_emoji("❌ No proxies available. Add proxies first using /addproxy"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No proxies available. Add proxies first using /addproxy"), parse_mode='html')
         return
     
-    status_msg = await send_with_delay(user_id, premium_emoji(f"🔄 Testing site: {site}..."), parse_mode='html')
+    status_msg = await send_with_retry(user_id, premium_emoji(f"🔄 Testing site: {site}..."), parse_mode='html')
     proxy = random.choice(proxies)
     result = await test_site(site, proxy)
     
@@ -1011,38 +1058,38 @@ async def add_site_command(event):
 async def remove_site_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     args = event.message.text.split(' ', 1)
     if len(args) < 2:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/rmsite https://domain.com</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/rmsite https://domain.com</code>"), parse_mode='html')
         return
     url_to_remove = args[1].strip()
     current_sites = load_user_sites(user_id)
     if url_to_remove not in current_sites:
-        await send_with_delay(user_id, premium_emoji(f"❌ Site not found: {url_to_remove}"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"❌ Site not found: {url_to_remove}"), parse_mode='html')
         return
     new_sites = [site for site in current_sites if site != url_to_remove]
     save_user_sites(user_id, new_sites)
-    await send_with_delay(user_id, premium_emoji(f"✅ <b>Site removed successfully!</b>\n\n{url_to_remove}"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"✅ <b>Site removed successfully!</b>\n\n{url_to_remove}"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/sitecheck'))
 async def site_check_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     sites = load_user_sites(user_id)
     if not sites:
-        await send_with_delay(user_id, premium_emoji("❌ No sites to check."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No sites to check."), parse_mode='html')
         return
     proxies = load_user_proxies(user_id)
     if not proxies:
-        await send_with_delay(user_id, premium_emoji("❌ No proxies available."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No proxies available."), parse_mode='html')
         return
-    status_msg = await send_with_delay(user_id, premium_emoji(f"🔥 Checking {len(sites)} sites..."), parse_mode='html')
+    status_msg = await send_with_retry(user_id, premium_emoji(f"🔥 Checking {len(sites)} sites..."), parse_mode='html')
     alive_sites = []
     dead_sites = []
     batch_size = 10
@@ -1082,15 +1129,15 @@ PRICE_RANGES = {
 async def add_sites_file_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     if not event.reply_to_msg_id:
-        await send_with_delay(user_id, premium_emoji("❌ Reply to a .txt file containing sites."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Reply to a .txt file containing sites."), parse_mode='html')
         return
     reply_msg = await event.get_reply_message()
     if not reply_msg.file or not reply_msg.file.name.endswith('.txt'):
-        await send_with_delay(user_id, premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
         return
     
     file_path = await reply_msg.download_media()
@@ -1102,7 +1149,7 @@ async def add_sites_file_command(event):
     sites = [s.replace('https://', '').replace('http://', '').rstrip('/') for s in sites]
     
     if not sites:
-        await send_with_delay(user_id, premium_emoji("❌ No valid sites found in file."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No valid sites found in file."), parse_mode='html')
         os.remove(file_path)
         return
     
@@ -1120,9 +1167,9 @@ async def add_sites_file_command(event):
         [Button.inline(PRICE_RANGES["4"]["name"], b"price_4")]
     ]
     
-    await send_with_delay(
+    await send_with_retry(
         user_id,
-        premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\nSites with minimum price above selected range will be removed.\n\nYou have {PENDING_TIMEOUT//60} minutes to select.\n\nChoose 'No filter' to skip filtering."),
+        premium_emoji(f"💰 <b>Select price range to filter sites:</b>\n\nSites will be filtered by their cheapest product price.\n\nYou have {PENDING_TIMEOUT//60} minutes to select.\n\nChoose 'No filter' to skip filtering."),
         buttons=price_keyboard,
         parse_mode='html'
     )
@@ -1144,41 +1191,67 @@ async def handle_price_selection(event):
     sites = sites_data['sites']
     price_range = PRICE_RANGES[price_key]
     
-    status_msg = await event.edit(premium_emoji(f"🔄 Filtering {len(sites)} sites by price ({price_range['name']})..."), parse_mode='html')
+    status_msg = await event.edit(premium_emoji(f"🔄 Filtering {len(sites)} sites...\n\n1. Checking Shopify gateway\n2. Filtering by price ({price_range['name']})"), parse_mode='html')
     
-    filtered_sites = []
-    checked = 0
-    total = len(sites)
+    proxies = load_user_proxies(user_id)
+    if not proxies:
+        await status_msg.edit(premium_emoji("❌ No proxies available to test sites."), parse_mode='html')
+        return
+    
+    proxy = random.choice(proxies)
+    
+    # أولاً: تصفية البوابات (يسمح فقط Shopify)
+    await status_msg.edit(premium_emoji(f"🔄 Checking gateway for {len(sites)} sites (Shopify only)..."), parse_mode='html')
+    
+    shopify_sites = []
+    non_shopify_sites = []
     
     for site in sites:
-        checked += 1
-        await status_msg.edit(premium_emoji(f"🔄 Checking site {checked}/{total}: {site[:30]}..."), parse_mode='html')
-        
-        min_price = await get_site_min_price(site)
-        
-        if min_price is None:
-            filtered_sites.append(site)
-        elif min_price <= price_range["max"]:
-            filtered_sites.append(site)
-        
-        await asyncio.sleep(0.3)
+        gateway = await get_site_gateway(site, proxy)
+        if gateway and any(allowed in gateway for allowed in ALLOWED_GATEWAYS):
+            shopify_sites.append(site)
+        else:
+            non_shopify_sites.append(site)
+        await status_msg.edit(premium_emoji(f"🔄 Checked: {len(shopify_sites) + len(non_shopify_sites)}/{len(sites)}\nShopify sites: {len(shopify_sites)}\nNon-Shopify: {len(non_shopify_sites)}"), parse_mode='html')
     
+    if not shopify_sites:
+        await status_msg.edit(premium_emoji("❌ No Shopify sites found in your file!\n\nOnly Shopify Payments sites are allowed."), parse_mode='html')
+        return
+    
+    # ثانياً: فلتر السعر
+    if price_range["min"] > 0 or price_range["max"] < 999999:
+        await status_msg.edit(premium_emoji(f"🔄 Filtering {len(shopify_sites)} sites by price ({price_range['name']})..."), parse_mode='html')
+        
+        filtered_sites = []
+        for site in shopify_sites:
+            min_price = await get_site_cheapest_product_price(site, proxy)
+            if min_price is None:
+                filtered_sites.append(site)  # لو معرفناش السعر، نضيفه
+            elif min_price <= price_range["max"]:
+                filtered_sites.append(site)
+            await status_msg.edit(premium_emoji(f"🔄 {site[:30]} - ${min_price if min_price else '?'}"), parse_mode='html')
+            await asyncio.sleep(0.2)
+        
+        shopify_sites = filtered_sites
+    
+    # إضافة المواقع
     current_sites = load_user_sites(user_id)
-    new_sites = [s for s in filtered_sites if s not in current_sites]
-    all_sites = list(set(current_sites + filtered_sites))
+    new_sites = [s for s in shopify_sites if s not in current_sites]
+    all_sites = list(set(current_sites + shopify_sites))
     save_user_sites(user_id, all_sites)
     
-    result_text = f"""✅ <b>Sites Added with Price Filter!</b>
+    result_text = f"""✅ <b>Sites Added with Filters!</b>
 
 📊 <b>Summary:</b>
 ├ Total sites in file: {len(sites)}
-├ Sites after filter: {len(filtered_sites)}
+├ Shopify sites found: {len(shopify_sites)}
+├ Non-Shopify removed: {len(non_shopify_sites)}
 ├ New sites added: {len(new_sites)}
 └ Total sites now: {len(all_sites)}
 
-💰 <b>Filter applied:</b> {price_range['name']}
+💰 <b>Price filter:</b> {price_range['name']}
+🔌 <b>Gateway filter:</b> Shopify Payments only
 
-⚠️ <b>Note:</b> Sites without price info were added anyway.
 📌 Use /sitecheck to verify all sites are working."""
     
     await status_msg.edit(premium_emoji(result_text), parse_mode='html')
@@ -1188,16 +1261,16 @@ async def handle_price_selection(event):
 async def add_proxy_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     try:
         args = event.message.text.split('\n')
         if len(args) < 2:
-            await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/addproxy</code> then proxies one per line."), parse_mode='html')
+            await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/addproxy</code> then proxies one per line."), parse_mode='html')
             return
         proxies_to_add = [line.strip() for line in args[1:] if line.strip()]
         if not proxies_to_add:
-            await send_with_delay(user_id, premium_emoji("❌ No proxies provided."), parse_mode='html')
+            await send_with_retry(user_id, premium_emoji("❌ No proxies provided."), parse_mode='html')
             return
         current_proxies = load_user_proxies(user_id)
         new_proxies = []
@@ -1205,29 +1278,29 @@ async def add_proxy_command(event):
             if proxy not in current_proxies:
                 new_proxies.append(proxy)
         if not new_proxies:
-            await send_with_delay(user_id, premium_emoji("⚠️ All proxies already exist."), parse_mode='html')
+            await send_with_retry(user_id, premium_emoji("⚠️ All proxies already exist."), parse_mode='html')
             return
         async with aiofiles.open(get_user_proxy_file(user_id), 'a') as f:
             for proxy in new_proxies:
                 await f.write(f"{proxy}\n")
-        await send_with_delay(user_id, premium_emoji(f"✅ <b>Proxies Added!</b>\n\nAdded {len(new_proxies)} new proxies."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"✅ <b>Proxies Added!</b>\n\nAdded {len(new_proxies)} new proxies."), parse_mode='html')
     except Exception as e:
-        await send_with_delay(user_id, premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"❌ Error: {e}"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/addproxies'))
 async def add_proxies_file_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     if not event.reply_to_msg_id:
-        await send_with_delay(user_id, premium_emoji("❌ Reply to a .txt file containing proxies."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Reply to a .txt file containing proxies."), parse_mode='html')
         return
     reply_msg = await event.get_reply_message()
     if not reply_msg.file or not reply_msg.file.name.endswith('.txt'):
-        await send_with_delay(user_id, premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
         return
-    status_msg = await send_with_delay(user_id, premium_emoji("🔄 Processing your file..."), parse_mode='html')
+    status_msg = await send_with_retry(user_id, premium_emoji("🔄 Processing your file..."), parse_mode='html')
     file_path = await reply_msg.download_media()
     async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         content = await f.read()
@@ -1249,13 +1322,13 @@ async def add_proxies_file_command(event):
 async def check_single_proxy_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     proxy = event.message.text.split(' ', 1)[1].strip() if len(event.message.text.split()) > 1 else None
     if not proxy:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/chkproxy ip:port:user:pass</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/chkproxy ip:port:user:pass</code>"), parse_mode='html')
         return
-    status_msg = await send_with_delay(user_id, premium_emoji(f"🔄 Checking proxy: <code>{proxy}</code>..."), parse_mode='html')
+    status_msg = await send_with_retry(user_id, premium_emoji(f"🔄 Checking proxy: <code>{proxy}</code>..."), parse_mode='html')
     try:
         result = await test_proxy_with_retry(proxy)
         if result['status'] == 'alive':
@@ -1269,30 +1342,30 @@ async def check_single_proxy_command(event):
 async def remove_single_proxy_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     proxy_to_remove = event.message.text.split(' ', 1)[1].strip() if len(event.message.text.split()) > 1 else None
     if not proxy_to_remove:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/rmproxy ip:port:user:pass</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/rmproxy ip:port:user:pass</code>"), parse_mode='html')
         return
     current_proxies = load_user_proxies(user_id)
     if proxy_to_remove not in current_proxies:
-        await send_with_delay(user_id, premium_emoji(f"❌ Proxy not found: <code>{proxy_to_remove}</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"❌ Proxy not found: <code>{proxy_to_remove}</code>"), parse_mode='html')
         return
     new_proxies = [p for p in current_proxies if p != proxy_to_remove]
     save_user_proxies(user_id, new_proxies)
-    await send_with_delay(user_id, premium_emoji(f"✅ <b>Proxy Removed!</b>\n\n<code>{proxy_to_remove}</code>"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"✅ <b>Proxy Removed!</b>\n\n<code>{proxy_to_remove}</code>"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/clearproxy'))
 async def clear_proxies_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     current_proxies = load_user_proxies(user_id)
     count = len(current_proxies)
     if count == 0:
-        await send_with_delay(user_id, premium_emoji("❌ No proxies to clear."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No proxies to clear."), parse_mode='html')
         return
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_filename = f"proxy_backup_{user_id}_{timestamp}.txt"
@@ -1300,30 +1373,30 @@ async def clear_proxies_command(event):
         async with aiofiles.open(backup_filename, 'w') as f:
             for proxy in current_proxies:
                 await f.write(f"{proxy}\n")
-        await send_with_delay(user_id, premium_emoji(f"📦 <b>Backup Created!</b>\n\nBackup of {count} proxies attached."), file=backup_filename, parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"📦 <b>Backup Created!</b>\n\nBackup of {count} proxies attached."), file=backup_filename, parse_mode='html')
         try:
             os.remove(backup_filename)
         except:
             pass
     except Exception as e:
-        await send_with_delay(user_id, premium_emoji(f"❌ Error creating backup: {e}"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"❌ Error creating backup: {e}"), parse_mode='html')
         return
     save_user_proxies(user_id, [])
-    await send_with_delay(user_id, premium_emoji(f"✅ <b>Cleared all {count} proxies!</b>"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"✅ <b>Cleared all {count} proxies!</b>"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/proxy'))
 async def proxy_check_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     proxies = load_user_proxies(user_id)
     if not proxies:
-        await send_with_delay(user_id, premium_emoji("❌ No proxies to check."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No proxies to check."), parse_mode='html')
         return
     
-    status_msg = await send_with_delay(user_id, premium_emoji(f"🔥 Checking {len(proxies)} proxies directly..."), parse_mode='html')
+    status_msg = await send_with_retry(user_id, premium_emoji(f"🔥 Checking {len(proxies)} proxies directly..."), parse_mode='html')
     
     results = await test_proxy_batch(proxies)
     
@@ -1367,22 +1440,22 @@ async def proxy_check_command(event):
 async def get_proxies_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     proxies = load_user_proxies(user_id)
     if not proxies:
-        await send_with_delay(user_id, premium_emoji("❌ No proxies in proxy.txt"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No proxies in proxy.txt"), parse_mode='html')
         return
     if len(proxies) <= 50:
         proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
-        await send_with_delay(user_id, premium_emoji(f"<b>📋 All Proxies ({len(proxies)}):</b>\n\n{proxy_list}"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"<b>📋 All Proxies ({len(proxies)}):</b>\n\n{proxy_list}"), parse_mode='html')
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"proxies_{user_id}_{timestamp}.txt"
         async with aiofiles.open(filename, 'w') as f:
             for i, proxy in enumerate(proxies):
                 await f.write(f"{i+1}. {proxy}\n")
-        await send_with_delay(user_id, premium_emoji(f"<b>📋 All Proxies ({len(proxies)}):</b>\n\nFile attached below."), file=filename, parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"<b>📋 All Proxies ({len(proxies)}):</b>\n\nFile attached below."), file=filename, parse_mode='html')
         try:
             os.remove(filename)
         except:
@@ -1410,9 +1483,9 @@ async def cancel_check_command(event):
         del user_pending_mass[user_id]
         canceled = True
     if canceled:
-        await send_with_delay(user_id, premium_emoji("✅ <b>Mass check cancelled!</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("✅ <b>Mass check cancelled!</b>"), parse_mode='html')
     else:
-        await send_with_delay(user_id, premium_emoji("❌ No mass check in progress"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No mass check in progress"), parse_mode='html')
 
 # ==================== فحص كارت واحد (سينجل) ====================
 
@@ -1421,39 +1494,39 @@ async def single_cc_check(event):
     user_id = event.sender_id
     
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     if user_id in user_current_check and user_current_check[user_id]:
-        await send_with_delay(user_id, premium_emoji("⏳ <b>You already have a check in progress. Wait until it completes.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("⏳ <b>You already have a check in progress. Wait until it completes.</b>"), parse_mode='html')
         return
     
     sites = load_user_sites(user_id)
     proxies = load_user_proxies(user_id)
     
     if not sites:
-        await send_with_delay(user_id, premium_emoji("❌ No sites available. Add sites using /site or /addsites"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No sites available. Add sites using /site or /addsites"), parse_mode='html')
         return
     if not proxies:
-        await send_with_delay(user_id, premium_emoji("❌ No proxies available. Add proxies using /addproxy or /addproxies"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No proxies available. Add proxies using /addproxy or /addproxies"), parse_mode='html')
         return
     
     parts = event.message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await send_with_delay(user_id, premium_emoji("❌ Invalid format. Use: `/cc 4242424242424242|12|25|123`"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Invalid format. Use: `/cc 4242424242424242|12|25|123`"), parse_mode='html')
         return
     
     cc_input = parts[1].strip()
     cards = extract_cc(cc_input)
     
     if not cards:
-        await send_with_delay(user_id, premium_emoji("❌ Invalid CC format. Use: <code>/cc card|mm|yy|cvv</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Invalid CC format. Use: <code>/cc card|mm|yy|cvv</code>"), parse_mode='html')
         return
     
     card = cards[0]
     user_current_check[user_id] = True
     
-    status_msg = await send_with_delay(
+    status_msg = await send_with_retry(
         user_id,
         premium_emoji(f"<b>⚡ 𝐂𝐡𝐞𝐜𝐤𝐢𝐧𝐠...</b>\n\n<blockquote>💳 Card: <code>{card}</code></blockquote>\n"),
         parse_mode='html'
@@ -1509,30 +1582,30 @@ async def mass_check_command(event):
     user_id = event.sender_id
     
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     
     if user_id in user_current_check and user_current_check[user_id]:
-        await send_with_delay(user_id, premium_emoji("⏳ <b>You already have a check in progress. Wait until it completes.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("⏳ <b>You already have a check in progress. Wait until it completes.</b>"), parse_mode='html')
         return
     
     if not event.reply_to_msg_id:
-        await send_with_delay(user_id, premium_emoji("❌ Reply to a .txt file containing cards."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Reply to a .txt file containing cards."), parse_mode='html')
         return
     
     reply_msg = await event.get_reply_message()
     if not reply_msg.file or not reply_msg.file.name.endswith('.txt'):
-        await send_with_delay(user_id, premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Reply to a .txt file."), parse_mode='html')
         return
     
     sites = load_user_sites(user_id)
     proxies = load_user_proxies(user_id)
     
     if not sites:
-        await send_with_delay(user_id, premium_emoji("❌ No sites available. Add sites first."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No sites available. Add sites first."), parse_mode='html')
         return
     if not proxies:
-        await send_with_delay(user_id, premium_emoji("❌ No proxies available. Add proxies first."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ No proxies available. Add proxies first."), parse_mode='html')
         return
     
     await cleanup_expired_pending()
@@ -1557,7 +1630,7 @@ async def mass_check_command(event):
         [Button.inline("❌ Cancel", b"mode_cancel")]
     ]
     
-    await send_with_delay(
+    await send_with_retry(
         user_id,
         premium_emoji(f"📋 <b>Select mode:</b>\n\n• CHARGES ONLY: Only send charged cards\n• ALL HITS: Send charged + approved cards\n\nYou have {PENDING_TIMEOUT//60} minutes to select."),
         buttons=mode_keyboard,
@@ -1784,7 +1857,7 @@ async def handle_mode_selection(event):
         
     except Exception as e:
         print(f"[ERROR] Mass check error: {e}")
-        await send_with_delay(user_id, premium_emoji(f"❌ An error occurred: {e}"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"❌ An error occurred: {e}"), parse_mode='html')
     finally:
         if session_key in active_sessions:
             del active_sessions[session_key]
@@ -1798,7 +1871,7 @@ async def handle_mode_selection(event):
 async def admin_panel(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     stats_text = """<b>👑 Admin Control Panel</b>
 
@@ -1812,13 +1885,13 @@ Use buttons below or direct commands:
 ├ <code>/users</code> - List all users
 ├ <code>/user user_id</code> - Show user details
 └ <code>/stats</code> - Bot statistics"""
-    await send_with_delay(user_id, premium_emoji(stats_text), buttons=get_admin_menu_keyboard(), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(stats_text), buttons=get_admin_menu_keyboard(), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/gencode'))
 async def generate_code_command(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     args = event.message.text.split()
     checks_limit = DEFAULT_CHECK_LIMIT
@@ -1826,58 +1899,58 @@ async def generate_code_command(event):
         try:
             checks_limit = int(args[1])
         except:
-            await send_with_delay(user_id, premium_emoji("❌ <b>Invalid number. Use a valid number.</b>"), parse_mode='html')
+            await send_with_retry(user_id, premium_emoji("❌ <b>Invalid number. Use a valid number.</b>"), parse_mode='html')
             return
     code = create_activation_code(checks_limit)
-    await send_with_delay(user_id, premium_emoji(f"✅ <b>Code Generated!</b>\n\nCode: <code>{code}</code>\nChecks: {checks_limit}\n\nUser can use: <code>/redeem {code}</code>"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"✅ <b>Code Generated!</b>\n\nCode: <code>{code}</code>\nChecks: {checks_limit}\n\nUser can use: <code>/redeem {code}</code>"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/block'))
 async def block_user_command(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     args = event.message.text.split()
     if len(args) < 2:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/block user_id</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/block user_id</code>"), parse_mode='html')
         return
     target_id = int(args[1])
     block_user(target_id)
-    await send_with_delay(user_id, premium_emoji(f"✅ <b>User {target_id} has been blocked!</b>"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"✅ <b>User {target_id} has been blocked!</b>"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/unblock'))
 async def unblock_user_command(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     args = event.message.text.split()
     if len(args) < 2:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/unblock user_id</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/unblock user_id</code>"), parse_mode='html')
         return
     target_id = int(args[1])
     unblock_user(target_id)
-    await send_with_delay(user_id, premium_emoji(f"✅ <b>User {target_id} has been unblocked!</b>"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"✅ <b>User {target_id} has been unblocked!</b>"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/broadcast'))
 async def broadcast_command(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     args = event.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/broadcast message</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/broadcast message</code>"), parse_mode='html')
         return
     message_text = args[1]
     users = get_all_users()
     total = len(users)
     success = 0
-    status_msg = await send_with_delay(user_id, premium_emoji(f"📢 Broadcasting to {total} users..."), parse_mode='html')
+    status_msg = await send_with_retry(user_id, premium_emoji(f"📢 Broadcasting to {total} users..."), parse_mode='html')
     
     for user_id_str, user_data in users.items():
         try:
-            await send_with_delay(int(user_id_str), premium_emoji(f"📢 <b>Broadcast from Admin</b>\n\n{message_text}"), parse_mode='html')
+            await send_with_retry(int(user_id_str), premium_emoji(f"📢 <b>Broadcast from Admin</b>\n\n{message_text}"), parse_mode='html')
             success += 1
         except:
             pass
@@ -1888,17 +1961,17 @@ async def broadcast_command(event):
 async def set_limit_command(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     args = event.message.text.split()
     if len(args) < 3:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/setlimit user_id number</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/setlimit user_id number</code>"), parse_mode='html')
         return
     target_id = int(args[1])
     try:
         new_limit = int(args[2])
     except:
-        await send_with_delay(user_id, premium_emoji("❌ Invalid number."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Invalid number."), parse_mode='html')
         return
     users = load_users()
     target_id_str = str(target_id)
@@ -1907,17 +1980,17 @@ async def set_limit_command(event):
     users[target_id_str]['check_limit'] = new_limit
     users[target_id_str]['premium'] = True
     save_users(users)
-    await send_with_delay(user_id, premium_emoji(f"✅ <b>User {target_id} limit updated!</b>\n\nNew limit: {new_limit} checks"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"✅ <b>User {target_id} limit updated!</b>\n\nNew limit: {new_limit} checks"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/users'))
 async def list_users_command(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     users = get_all_users()
     if not users:
-        await send_with_delay(user_id, premium_emoji("📋 No users found."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("📋 No users found."), parse_mode='html')
         return
     text = "<b>📋 Users List:</b>\n\n"
     for uid, data in users.items():
@@ -1931,30 +2004,30 @@ async def list_users_command(event):
             filename = f"users_{timestamp}.txt"
             async with aiofiles.open(filename, 'w') as f:
                 await f.write(text)
-            await send_with_delay(user_id, file=filename, parse_mode='html')
+            await send_with_retry(user_id, file=filename, parse_mode='html')
             try:
                 os.remove(filename)
             except:
                 pass
             text = ""
     if text:
-        await send_with_delay(user_id, premium_emoji(text), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(text), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/user'))
 async def user_info_command(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     args = event.message.text.split()
     if len(args) < 2:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/user user_id</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/user user_id</code>"), parse_mode='html')
         return
     target_id = args[1]
     users = load_users()
     user_data = users.get(target_id, {})
     if not user_data:
-        await send_with_delay(user_id, premium_emoji(f"❌ User {target_id} not found."), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"❌ User {target_id} not found."), parse_mode='html')
         return
     is_target_admin = is_admin(int(target_id))
     text = f"""<b>👤 User Data: {target_id}</b>
@@ -1967,13 +2040,13 @@ async def user_info_command(event):
 ├ 💳 Check Limit: {user_data.get('check_limit', 0) if not is_target_admin else 'UNLIMITED'}
 ├ 💰 Checks Left: {max(0, user_data.get('check_limit', 0) - user_data.get('total_checks', 0)) if not is_target_admin else '♾️'}
 └ 📅 Registered: {user_data.get('registered_at', 'Unknown')[:10]}"""
-    await send_with_delay(user_id, premium_emoji(text), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(text), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/stats'))
 async def bot_stats_command(event):
     user_id = event.sender_id
     if not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ <b>Only admin can use this command.</b>"), parse_mode='html')
         return
     users = get_all_users()
     total_users = len(users)
@@ -1991,35 +2064,35 @@ async def bot_stats_command(event):
 ├ 📈 Total Checks: {total_checks}
 ├ 🎫 Total Codes: {total_codes}
 └ ⏱️ Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-    await send_with_delay(user_id, premium_emoji(text), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(text), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/subscribe'))
 async def subscribe_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
-    await send_with_delay(user_id, premium_emoji(f"⭐ <b>Premium Subscription</b>\n\nPrice: {PREMIUM_PRICE_STARS} stars\nChecks: {DEFAULT_CHECK_LIMIT} card checks\n\nSend {PREMIUM_PRICE_STARS} stars to the bot to subscribe.\n\nOr use activation code: /redeem CODE\n\nContact admin: @Joker"), parse_mode='html')
+    await send_with_retry(user_id, premium_emoji(f"⭐ <b>Premium Subscription</b>\n\nPrice: {PREMIUM_PRICE_STARS} stars\nChecks: {DEFAULT_CHECK_LIMIT} card checks\n\nSend {PREMIUM_PRICE_STARS} stars to the bot to subscribe.\n\nOr use activation code: /redeem CODE\n\nContact admin: @Joker"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern=r'^/redeem\s+'))
 async def redeem_command(event):
     user_id = event.sender_id
     if is_user_blocked(user_id) and not is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("🚫 <b>You have been banned from this bot.</b>"), parse_mode='html')
         return
     if is_admin(user_id):
-        await send_with_delay(user_id, premium_emoji("👑 <b>You are admin, no need to redeem!</b>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("👑 <b>You are admin, no need to redeem!</b>"), parse_mode='html')
         return
     args = event.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await send_with_delay(user_id, premium_emoji("❌ Usage: <code>/redeem CODE</code>"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji("❌ Usage: <code>/redeem CODE</code>"), parse_mode='html')
         return
     code = args[1].strip().upper()
     success, message = activate_code(user_id, code)
     if success:
-        await send_with_delay(user_id, premium_emoji(f"✅ <b>Subscription Activated!</b>\n\n{message}"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"✅ <b>Subscription Activated!</b>\n\n{message}"), parse_mode='html')
     else:
-        await send_with_delay(user_id, premium_emoji(f"❌ <b>Activation Failed!</b>\n\n{message}"), parse_mode='html')
+        await send_with_retry(user_id, premium_emoji(f"❌ <b>Activation Failed!</b>\n\n{message}"), parse_mode='html')
 
 # ==================== أحداث الأزرار ====================
 
@@ -2133,6 +2206,7 @@ async def main():
     print(f"📡 API URL: {CHECKER_API_URL}")
     print(f"⚙️ Message Delay: {MESSAGE_DELAY}s")
     print(f"🔧 Max Workers: {MAX_WORKERS}")
+    print(f"🔄 Auto-Retry on Flood: {MAX_RETRY_ON_FLOOD} attempts")
     print("=" * 50)
     await bot.run_until_disconnected()
 
