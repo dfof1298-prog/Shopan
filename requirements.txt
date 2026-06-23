@@ -5,3 +5,4 @@ flask
 aiohttp
 asyncio
 curl_cffi
+psutil
