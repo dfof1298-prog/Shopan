@@ -4,3 +4,4 @@ aiofiles>=23.0.0
 flask
 aiohttp
 asyncio
+curl_cffi
