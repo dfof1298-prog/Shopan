@@ -971,6 +971,17 @@ async def main():
             print(f"❌ An error occurred in main: {e}")
 
 
+# ════════════════════════════════════════════════════════════════
+# ✅ IMPORT fetch_products من jo.py
+# ════════════════════════════════════════════════════════════════
+try:
+    from jo import fetch_products
+    _JO_AVAILABLE = True
+    print("[shopifyapi] ✅ jo.py fetch_products loaded")
+except ImportError:
+    _JO_AVAILABLE = False
+    print("[shopifyapi] ⚠️ jo.py not available — using fallback")
+
 async def check_site_fast(site_url, proxy_url=None, max_price=999999.0, min_price=0.01):
     site_url = site_url.strip().rstrip("/")
     fingerprint = get_random_fingerprint()
@@ -992,6 +1003,29 @@ async def check_site_fast(site_url, proxy_url=None, max_price=999999.0, min_pric
     _proxy_fmt = None
     if proxy_url:
         _proxy_fmt = format_proxy(proxy_url) if isinstance(proxy_url, str) else proxy_url
+    
+    # ✅ استخدم jo.py fetch_products لو متاح
+    if _JO_AVAILABLE:
+        try:
+            info = await fetch_products(site_url, _proxy_fmt)
+            if not info or not isinstance(info, dict):
+                return {"ok": False, "price": None, "product": "", "available": False, "error": "No products found"}
+            
+            price_val = float(info.get('price', 0))
+            if price_val < min_price or price_val > max_price:
+                return {"ok": False, "price": None, "product": "", "available": False, "error": f"No products between ${min_price:.2f}-${max_price:.2f}"}
+            
+            return {
+                "ok": True,
+                "price": info.get('price', '0'),
+                "product": info.get('site', site_url)[:60],
+                "available": True,
+                "lowest_price": price_val
+            }
+        except Exception as e:
+            return {"ok": False, "price": None, "product": "", "available": False, "error": str(e)[:100]}
+    
+    # Fallback: الطريقة القديمة
     try:
         async with _create_async_client(proxy_url=_proxy_fmt, timeout=12.0, chrome_version=fingerprint.get("_chrome_ver")) as client:
             r = await client.get(site_url + "/products.json", headers=product_header)
@@ -1066,10 +1100,10 @@ async def check_site_fast(site_url, proxy_url=None, max_price=999999.0, min_pric
 
 _POLL_QUERY = "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}"
 
-_CAPTCHA_MAX_RETRIES = 0  # تم التعديل: من 1 لـ 0
+_CAPTCHA_MAX_RETRIES = 0
 
 # ── Global concurrency limiter ────────────────────────────────────────
-_MAX_CONCURRENT_CHECKS = 20  # تم التعديل: من 30 لـ 10
+_MAX_CONCURRENT_CHECKS = 20
 _check_semaphore = None
 _active_checks = 0
 
@@ -1087,7 +1121,6 @@ def _is_captcha_result(result):
 async def run_shopify_check(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None, min_price=0.01, max_price=999999.0):
     global _active_checks, _check_semaphore
     
-    # تم التعديل: إضافة حد أقصى للشيكات المتزامنة
     if _active_checks > 15:
         return {"status": "Error", "message": "Server busy, try again", "error_code": "SERVER_BUSY"}
     
@@ -1308,66 +1341,86 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
     except Exception:
         pass
 
+    # ═══════════════════════════════════════════════════════════
+    # ✅ استخدم fetch_products من jo.py لجلب المنتج الأرخص
+    # ═══════════════════════════════════════════════════════════
     try:
-        cached = _get_cached_products(site)
-        if cached:
-            products = cached
-            _steps.append("1. Products: cached")
+        if _JO_AVAILABLE:
+            _log_verbose(verbose, "📦 Using jo.py fetch_products for product discovery", discord_webhook=discord_console_webhook)
+            info = await fetch_products(site, proxy_url)
+            if not info or not isinstance(info, dict):
+                return {"status": "Error", "message": "No products found via jo.py", "debug_steps": _steps}
+            
+            variant_id = info['variant_id']
+            price = info['price']
+            product_title = info.get('site', site)
+            product_handle = info.get('link', '').split('/')[-1] if info.get('link') else ''
+            
+            _steps.append(f"1. Product (jo.py): {product_title[:40]} | ${price} | variant={variant_id}")
+            _log_verbose(verbose, f"✅ Product (jo.py): {product_title[:40]} price={price}", discord_webhook=discord_console_webhook)
         else:
-            product_response = await session.get(site + "/products.json", headers=product_header)
-            _steps.append(f"1. Products: HTTP {product_response.status_code}")
-            if product_response.status_code != 200:
-                return {"status": "Error", "message": f"Products page HTTP {product_response.status_code}", "debug_steps": _steps}
-            try:
-                products_data = product_response.json()
-            except Exception:
-                return {"status": "Error", "message": "Products page not JSON (site may be down)", "debug_steps": _steps}
-            products = products_data.get("products") or []
-            if products:
-                _set_cached_products(site, products)
-        if not products:
-            return {"status": "Error", "message": "No products found", "debug_steps": _steps}
-        
-        lowest_price = None
-        lowest_product = None
-        lowest_variant = None
-        
-        for product in products:
-            variants = product.get("variants") or []
-            for v in variants:
-                available = v.get("available", True)
-                if isinstance(available, str):
-                    available = available.lower() in ("true", "1", "yes")
-                
-                if not available:
-                    continue
-                
-                price_str = v.get("price") or "0"
+            # Fallback: الطريقة القديمة
+            _log_verbose(verbose, "📦 jo.py not available, using fallback product discovery", discord_webhook=discord_console_webhook)
+            cached = _get_cached_products(site)
+            if cached:
+                products = cached
+                _steps.append("1. Products: cached")
+            else:
+                product_response = await session.get(site + "/products.json", headers=product_header)
+                _steps.append(f"1. Products: HTTP {product_response.status_code}")
+                if product_response.status_code != 200:
+                    return {"status": "Error", "message": f"Products page HTTP {product_response.status_code}", "debug_steps": _steps}
                 try:
-                    price_val = float(str(price_str).replace("$", "").replace(",", "").strip())
-                except (ValueError, TypeError):
-                    continue
-                
-                # ✅ التعديل: استخدام min_price و max_price بدل الفلتر الثابت
-                if price_val < min_price or price_val > max_price:
-                    continue
-                
-                if lowest_price is None or price_val < lowest_price:
-                    lowest_price = price_val
-                    lowest_product = product
-                    lowest_variant = v
-        
-        if lowest_product is None or lowest_variant is None:
-            return {"status": "Error", "message": f"No available products in price range (${min_price:.2f}-${max_price:.2f})", "debug_steps": _steps}
-        
-        product_handle = lowest_product["handle"]
-        variant_id = lowest_variant["id"]
-        price = lowest_variant["price"]
-        product_title = lowest_product["title"]
-        _steps.append(f"2. Product: {product_title[:40]} | ${price} | variant={variant_id}")
-        _log_verbose(verbose, f"✅ Product: {product_title[:40]} price={price}", discord_webhook=discord_console_webhook)
+                    products_data = product_response.json()
+                except Exception:
+                    return {"status": "Error", "message": "Products page not JSON (site may be down)", "debug_steps": _steps}
+                products = products_data.get("products") or []
+                if products:
+                    _set_cached_products(site, products)
+            if not products:
+                return {"status": "Error", "message": "No products found", "debug_steps": _steps}
+            
+            lowest_price = None
+            lowest_product = None
+            lowest_variant = None
+            
+            for product in products:
+                variants = product.get("variants") or []
+                for v in variants:
+                    available = v.get("available", True)
+                    if isinstance(available, str):
+                        available = available.lower() in ("true", "1", "yes")
+                    
+                    if not available:
+                        continue
+                    
+                    price_str = v.get("price") or "0"
+                    try:
+                        price_val = float(str(price_str).replace("$", "").replace(",", "").strip())
+                    except (ValueError, TypeError):
+                        continue
+                    
+                    # ✅ استخدم min_price و max_price بدل الفلتر الثابت
+                    if price_val < min_price or price_val > max_price:
+                        continue
+                    
+                    if lowest_price is None or price_val < lowest_price:
+                        lowest_price = price_val
+                        lowest_product = product
+                        lowest_variant = v
+            
+            if lowest_product is None or lowest_variant is None:
+                return {"status": "Error", "message": f"No available products in price range (${min_price:.2f}-${max_price:.2f})", "debug_steps": _steps}
+            
+            product_handle = lowest_product["handle"]
+            variant_id = lowest_variant["id"]
+            price = lowest_variant["price"]
+            product_title = lowest_product["title"]
+            _steps.append(f"2. Product (fallback): {product_title[:40]} | ${price} | variant={variant_id}")
+            _log_verbose(verbose, f"✅ Product (fallback): {product_title[:40]} price={price}", discord_webhook=discord_console_webhook)
     except Exception as e:
         return {"status": "Error", "message": f"Product fetch: {str(e)[:100]}", "debug_steps": _steps}
+    
     try:
         await asyncio.sleep(random.uniform(0.4, 1.2))
 
