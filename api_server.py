@@ -23,7 +23,7 @@ app = Flask(__name__)
 NUM_WORKERS = 10
 TIMEOUT = 55
 MAX_QUEUE = 1000
-AUTO_RESTART_INTERVAL = 3600
+AUTO_RESTART_INTERVAL = 3600  # إعادة تشغيل كل ساعة (3600 ثانية)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE
@@ -65,23 +65,26 @@ def fix_proxy(proxy_str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def memory_cleaner():
+    """ينظف الذاكرة كل 5 دقائق"""
     global _last_cleanup, _results, _events
     while _running:
-        time.sleep(300)
+        time.sleep(300)  # كل 5 دقائق
         now = time.time()
         if now - _last_cleanup > 300:
+            # تنظيف الـ results القديمة (أقدم من 10 دقائق)
             with _rlock:
                 old_results = []
                 for rid, res in _results.items():
                     try:
                         rid_time = float(rid.split('_')[0])
-                        if now - rid_time > 600:
+                        if now - rid_time > 600:  # أقدم من 10 دقائق
                             old_results.append(rid)
                     except:
                         pass
                 for rid in old_results:
                     _results.pop(rid, None)
                 
+                # تنظيف الـ events القديمة
                 old_events = []
                 for rid, ev in _events.items():
                     try:
@@ -93,34 +96,28 @@ def memory_cleaner():
                 for rid in old_events:
                     _events.pop(rid, None)
             
+            # تنظيف الذاكرة
             gc.collect()
             _last_cleanup = now
             print(f"[MEMORY] 🧹 Cleaned {len(old_results)} old results, {len(old_events)} old events | Memory: {gc.get_count()}")
 
 def auto_restart():
+    """يعيد تشغيل الـ API تلقائياً بعد فترة"""
     global _restart_timer
     time.sleep(AUTO_RESTART_INTERVAL)
     print("[RESTART] 🔄 Auto-restarting API...")
     os.execl(sys.executable, sys.executable, *sys.argv)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ASYNC CHECK - ✅ تم التعديل
+# ASYNC CHECK
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_async_check(site, card_str, proxy, min_price=0.01, max_price=999999.0):
+def run_async_check(site, card_str, proxy):
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         result = loop.run_until_complete(
-            run_shopify_check(
-                site, 
-                card_str, 
-                proxy, 
-                verbose=False, 
-                timeout=50.0,
-                min_price=min_price,
-                max_price=max_price
-            )
+            run_shopify_check(site, card_str, proxy, verbose=False, timeout=50.0)
         )
         loop.close()
         
@@ -156,7 +153,7 @@ def _worker(wid):
         except queue.Empty:
             continue
         
-        rid, site, cc, mon, yr, cvv, proxy, min_price, max_price = req
+        rid, site, cc, mon, yr, cvv, proxy = req
         _busy[wid] = True
         
         try:
@@ -165,7 +162,7 @@ def _worker(wid):
             
             print(f"[W{wid}] 🔍 {site[:30]}...")
             start = time.time()
-            res = run_async_check(site, card_str, proxy_fixed, min_price, max_price)
+            res = run_async_check(site, card_str, proxy_fixed)
             elapsed = time.time() - start
             print(f"[W{wid}] ✅ {res['status']} | {elapsed:.1f}s")
         except Exception as e:
@@ -186,15 +183,20 @@ def _start():
         return
     _running = True
     
+    # بدء عمال الذاكرة
     threading.Thread(target=memory_cleaner, daemon=True).start()
     
+    # بدء عمال إعادة التشغيل (اختياري)
+    # threading.Thread(target=auto_restart, daemon=True).start()
+    
+    # بدء عمال الشغل
     for i in range(NUM_WORKERS):
         threading.Thread(target=_worker, args=(i,), daemon=True).start()
     print(f"[API] ✅ {NUM_WORKERS} workers started")
     print(f"[API] 🧹 Memory cleaner: Every 5 minutes")
     print(f"[API] 🔄 Auto-restart: Every {AUTO_RESTART_INTERVAL//3600} hour(s)")
 
-def _check(site, card, proxy, min_price=0.01, max_price=999999.0):
+def _check(site, card, proxy):
     _start()
     
     p = card.strip().replace(" ", "").split("|")
@@ -210,7 +212,7 @@ def _check(site, card, proxy, min_price=0.01, max_price=999999.0):
     with _rlock:
         _events[rid] = ev
     
-    _queue.put((rid, site, cc, mon, yr, cvv, proxy, min_price, max_price))
+    _queue.put((rid, site, cc, mon, yr, cvv, proxy))
     
     if ev.wait(timeout=TIMEOUT):
         with _rlock:
@@ -223,7 +225,7 @@ def _check(site, card, proxy, min_price=0.01, max_price=999999.0):
     return {"status": "Error", "Response": "Timeout"}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ENDPOINTS - ✅ تم التعديل
+# ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/shopify', methods=['GET'])
@@ -232,15 +234,11 @@ def shopify():
     cc = request.args.get('cc', '').strip()
     proxy = request.args.get('proxy', '').strip()
     
-    # ✅ أضيفت معاملات الأسعار
-    min_price = float(request.args.get('min_price', 0.01))
-    max_price = float(request.args.get('max_price', 999999.0))
-    
     if not site or not cc or cc.count('|') != 3:
         return jsonify({"status": "Error", "Response": "Bad params"})
     
     t0 = time.time()
-    res = _check(site, cc, proxy if proxy else None, min_price, max_price)
+    res = _check(site, cc, proxy if proxy else None)
     elapsed = time.time() - t0
     
     out = {
@@ -270,6 +268,7 @@ def health():
 
 @app.route('/clear_queue', methods=['POST'])
 def clear_queue():
+    """مسح الـ queue بالكامل - للأدمن"""
     with _rlock:
         size = _queue.qsize()
         while not _queue.empty():
