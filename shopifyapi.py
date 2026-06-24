@@ -76,17 +76,28 @@ class _CurlSessionWrapper:
         await self._s.close()
 
 
-async def _retry_async_request(func, *args, retries=3, delay=1.0, backoff_factor=2, **kwargs):
+async def _retry_async_request(func, *args, retries=5, delay=0.5, backoff_factor=1.5, **kwargs):
+    """
+    آلية إعادة محاولة متطورة:
+    - زيادة عدد المحاولات إلى 5.
+    - تقليل التأخير الابتدائي لسرعة الاستجابة.
+    - استخدام backoff factor أقل لتجنب الانتظار الطويل جداً تحت الضغط.
+    """
+    last_exception = None
     for i in range(retries):
         try:
             return await func(*args, **kwargs)
         except _NETWORK_ERRORS as e:
+            last_exception = e
             if i < retries - 1:
-                print(f"   ⚠️ Request failed ({e}), retrying in {delay:.2f}s...")
-                await asyncio.sleep(delay)
-                delay *= backoff_factor
+                # إضافة jitter عشوائي لتجنب ظاهرة Thundering Herd
+                sleep_time = delay * (backoff_factor ** i) + random.uniform(0.1, 0.5)
+                await asyncio.sleep(sleep_time)
             else:
-                raise
+                raise last_exception
+        except Exception as e:
+            # في حالة وجود أخطاء غير شبكية، لا نعيد المحاولة إلا إذا كانت أخطاء عابرة محددة
+            raise e
 
 def _create_async_client(proxy_url=None, timeout=30.0, chrome_version=None):
     if _CURL_CFFI_AVAILABLE:
@@ -108,7 +119,7 @@ def _create_async_client(proxy_url=None, timeout=30.0, chrome_version=None):
         client_kw = {
             "follow_redirects": True,
             "timeout": httpx.Timeout(timeout, connect=10.0, read=30.0, write=10.0, pool=10.0), # Increased timeouts for better resilience under load
-            "limits": httpx.Limits(max_connections=200, max_keepalive_connections=50), # Increased connection limits for higher concurrency
+            "limits": httpx.Limits(max_connections=500, max_keepalive_connections=100), # زيادة كبيرة في عدد الاتصالات المتزامنة والمستمرة
             "http2": _H2_AVAILABLE,
         }
         if proxy_url:
@@ -1081,7 +1092,9 @@ _POLL_QUERY = "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receip
 _CAPTCHA_MAX_RETRIES = 0  # تم التعديل: من 1 لـ 0
 
 # ── Global concurrency limiter ────────────────────────────────────────
-_MAX_CONCURRENT_CHECKS = 20  # تم التعديل: من 30 لـ 10
+_MAX_CONCURRENT_CHECKS = 100  # تم زيادته بشكل كبير لدعم الضغط العالي جداً
+_QUEUE_SIZE_LIMIT = 200      # حد أقصى لعدد الطلبات المنتظرة في الطابور قبل رفض الجديد
+_current_queue_size = 0      # تتبع عدد الطلبات التي تنتظر الـ Semaphore
 _check_semaphore = None
 _active_checks = 0
 
@@ -1097,20 +1110,30 @@ def _is_captcha_result(result):
 
 
 async def run_shopify_check(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None):
-    global _active_checks, _check_semaphore
+    global _active_checks, _check_semaphore, _current_queue_size
     
-    # تم التعديل: إضافة حد أقصى للشيكات المتزامنة
-    if _active_checks > 15:
-        return {"status": "Error", "message": "Server busy, try again", "error_code": "SERVER_BUSY"}
-    
+    # إدارة الطابور لمنع تراكم الطلبات التي ستؤدي حتماً لـ Timeout
+    if _current_queue_size >= _QUEUE_SIZE_LIMIT:
+        return {"status": "Error", "message": "System Overloaded - Queue Full", "error_code": "SYSTEM_OVERLOAD"}
+
     if _check_semaphore is None:
         _check_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_CHECKS)
-    async with _check_semaphore:
-        _active_checks += 1
-        try:
-            return await _run_shopify_check_inner(site_url, card_str, proxy_url, verbose, discord_console_webhook, timeout, max_captcha_retries=max_captcha_retries)
-        finally:
-            _active_checks -= 1
+    
+    _current_queue_size += 1
+    try:
+        # الانتظار في الطابور حتى يسمح الـ Semaphore بالدخول
+        async with _check_semaphore:
+            _current_queue_size -= 1
+            _active_checks += 1
+            try:
+                # تقليل المهلة الكلية قليلاً لضمان عدم بقاء الطلب عالقاً لفترة طويلة جداً
+                actual_timeout = min(float(timeout), 90.0) 
+                return await _run_shopify_check_inner(site_url, card_str, proxy_url, verbose, discord_console_webhook, actual_timeout, max_captcha_retries=max_captcha_retries)
+            finally:
+                _active_checks -= 1
+    except Exception as e:
+        if _current_queue_size > 0: _current_queue_size -= 1
+        raise e
 
 async def _run_shopify_check_inner(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None):
     site_url = site_url.strip().rstrip("/")
