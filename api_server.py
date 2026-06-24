@@ -1,5 +1,5 @@
 """
-Shiro Shopify API v8.0 - ASYNC QUEUE & BACKGROUND WORKERS
+Shiro Shopify API v8.1 - FIXED ASYNC QUEUE & BACKGROUND WORKERS
 """
 
 import time
@@ -8,6 +8,7 @@ import random
 import gc
 import os
 import uuid
+import threading
 from flask import Flask, request, jsonify
 from shopifyapi import run_shopify_check
 
@@ -26,6 +27,7 @@ CLEANUP_INTERVAL = 300     # تنظيف الذاكرة كل 5 دقائق
 _results = {}  # {task_id: {"status": "...", "result": ...}}
 _queue = asyncio.Queue()
 _active_tasks = 0
+_worker_loop = None  # سيتم تخزين الـ loop هنا للوصول إليه من Flask
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PROXY PARSER
@@ -101,7 +103,8 @@ async def cleanup_task():
         now = time.time()
         to_delete = [tid for tid, data in _results.items() if now - data.get("timestamp", 0) > RESULTS_EXPIRY]
         for tid in to_delete:
-            del _results[tid]
+            if tid in _results:
+                del _results[tid]
         gc.collect()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -120,16 +123,11 @@ def submit():
     task_id = str(uuid.uuid4())
     _results[task_id] = {"completed": False, "timestamp": time.time()}
     
-    # وضع المهمة في الطابور
-    # بما أننا في Flask (Synchronous)، نحتاج لطريقة لوضعها في asyncio queue
-    # سنستخدم loop.call_soon_threadsafe إذا كان السيرفر يعمل بـ loop
-    # ولكن للتبسيط في هذا الهيكل، سنقوم بتعديل كيفية تشغيل السيرفر
-    
-    try:
-        loop = asyncio.get_event_loop()
-        loop.call_soon_threadsafe(_queue.put_nowait, (task_id, site, cc, proxy))
-    except Exception as e:
-        return jsonify({"status": "Error", "Response": "Server Error: Loop not running"}), 500
+    # وضع المهمة في الطابور باستخدام الـ loop المخصص للعمال
+    if _worker_loop and _worker_loop.is_running():
+        _worker_loop.call_soon_threadsafe(_queue.put_nowait, (task_id, site, cc, proxy))
+    else:
+        return jsonify({"status": "Error", "Response": "Server Error: Worker loop not ready"}), 500
         
     return jsonify({"status": "Success", "task_id": task_id})
 
@@ -153,12 +151,16 @@ def shopify_legacy():
     
     task_id = str(uuid.uuid4())
     _results[task_id] = {"completed": False, "timestamp": time.time()}
-    asyncio.get_event_loop().call_soon_threadsafe(_queue.put_nowait, (task_id, site, cc, proxy))
+    
+    if _worker_loop and _worker_loop.is_running():
+        _worker_loop.call_soon_threadsafe(_queue.put_nowait, (task_id, site, cc, proxy))
+    else:
+        return jsonify({"status": "Error", "Response": "Worker loop not ready"}), 500
     
     # الانتظار لمدة 10 ثوانٍ كحد أقصى للرد المباشر
     for _ in range(20):
         time.sleep(0.5)
-        if _results[task_id]["completed"]:
+        if _results.get(task_id) and _results[task_id]["completed"]:
             return jsonify(_results[task_id]["data"])
             
     return jsonify({"status": "Pending", "task_id": task_id, "Response": "Task submitted, please poll /status/<task_id>"})
@@ -168,8 +170,7 @@ def shopify_legacy():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_server():
-    import threading
-    from app import app # This is just a placeholder, we use the global app
+    global _worker_loop
     
     # تشغيل العمال في loop منفصل
     def start_loop(loop):
@@ -179,8 +180,8 @@ def run_server():
         loop.create_task(cleanup_task())
         loop.run_forever()
 
-    new_loop = asyncio.new_event_loop()
-    t = threading.Thread(target=start_loop, args=(new_loop,), daemon=True)
+    _worker_loop = asyncio.new_event_loop()
+    t = threading.Thread(target=start_loop, args=(_worker_loop,), daemon=True)
     t.start()
     
     # تشغيل Flask
